@@ -1,0 +1,70 @@
+{
+  "manifest_version": 3,
+  "name": "Archive Downloader",
+  "version": "1.0.0",
+  "description": "Download, convert, and liberate Archive.org borrowed books to PDFs, images, and Markdown text.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://archive.org/*",
+    "https://*.archive.org/*",
+    "https://babel.hathitrust.org/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Archive Downloader",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://archive.org/details/*",
+        "https://*.archive.org/details/*",
+        "https://babel.hathitrust.org/cgi/pt*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://archive.org/details/*",
+        "https://*.archive.org/details/*",
+        "https://babel.hathitrust.org/cgi/pt*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": [
+        "https://archive.org/*",
+        "https://*.archive.org/*",
+        "https://babel.hathitrust.org/*"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Archive Downloader</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">
+      <img class="logo-img" src="../icons/icon48.png" alt="Archive Downloader" />
+      <h1>Archive Downloader</h1>
+    </div>
+    <div class="status-badge" id="statusBadge">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Checking...</span>
+    </div>
+  </div>
+
+  <!-- Active Book Card -->
+  <div class="section book-card" id="bookCard">
+    <div class="book-header">
+      <h2 class="book-title" id="bookTitle">Scanning active tab...</h2>
+    </div>
+    <div class="book-meta-grid">
+      <div class="meta-item">
+        <span class="meta-label">Total Pages:</span>
+        <span class="meta-val" id="bookTotalPages">-</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">View Mode:</span>
+        <span class="meta-val" id="bookViewMode">Checking...</span>
+      </div>
+    </div>
+    <button class="btn btn-warning btn-sm" id="enforceModeBtn" style="display: none; margin-top: 8px;">
+      ⚡ Switch to 1-Page View
+    </button>
+  </div>
+
+  <!-- Range Selection -->
+  <div class="section range-section">
+    <div class="range-inputs">
+      <div class="input-col">
+        <label for="startPageInput">Start Page:</label>
+        <input type="number" id="startPageInput" min="0" value="0" />
+      </div>
+      <div class="input-col">
+        <label for="endPageInput">End Page:</label>
+        <input type="number" id="endPageInput" min="0" value="0" placeholder="All" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Progress & Preview -->
+  <div class="section progress-section" id="progressSection" style="display: none;">
+    <div class="progress-info">
+      <span class="progress-label" id="progressCounter">Page 0 / 0</span>
+      <span class="progress-pct" id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar-track">
+      <div class="progress-bar-fill" id="progressBarFill"></div>
+    </div>
+    <div class="progress-detail" id="progressDetail">Preparing...</div>
+    <div class="progress-dimensions" id="progressDimensions" style="font-size: 10px; color: #888; margin-top: 2px;">(image: - x -)</div>
+
+    <!-- Live Captured Thumbnail -->
+    <div class="thumbnail-container" id="thumbnailContainer" style="display: none;">
+      <img id="thumbnailImg" src="" alt="Captured Page Preview" />
+    </div>
+  </div>
+
+  <!-- Primary Action Controls -->
+  <div class="section action-section">
+    <div class="button-row">
+      <button class="btn btn-primary" id="startBtn">▶ Start Download</button>
+      <button class="btn btn-warning" id="continueBtn" style="display: none;">▶ CONTINUE</button>
+      <button class="btn btn-success" id="viewFileBtn" style="display: none;">✔ View File</button>
+      <button class="btn btn-secondary" id="pauseBtn" style="display: none;">❚❚ Pause</button>
+      <button class="btn btn-primary" id="resumeBtn" style="display: none;">▶ Resume</button>
+      <button class="btn btn-danger" id="stopBtn" style="display: none;">◼ Stop</button>
+    </div>
+  </div>
+
+  <!-- Settings Accordion -->
+  <div class="section settings-accordion">
+    <div class="accordion-header" id="settingsToggle">
+      <span>⚙️ Settings & Paths</span>
+      <span class="toggle-arrow" id="settingsArrow">▸</span>
+    </div>
+    <div class="accordion-body" id="settingsBody" style="display: none;">
+      <div class="setting-item">
+        <label for="baseDirInput">Base Subdirectory (in Downloads):</label>
+        <input type="text" id="baseDirInput" value="ArchiveBooks" placeholder="ArchiveBooks" />
+      </div>
+
+      <div class="setting-item">
+        <label for="folderPatternSelect">Subfolder Naming:</label>
+        <select id="folderPatternSelect">
+          <option value="{title}_{id}">{title}_{id}</option>
+          <option value="{title}">{title}</option>
+          <option value="{id}">{id}</option>
+        </select>
+      </div>
+
+      <div class="setting-item-checkboxes">
+        <label class="checkbox-label">
+          <input type="checkbox" id="saveImagesCheck" />
+          <span>Save Individual Images (.jpg)</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="generatePdfCheck" checked />
+          <span>Compile into Single PDF (.pdf)</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="saveTextMdCheck" checked />
+          <span>Extract Text as Markdown (.md)</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="autoSinglePageCheck" checked />
+          <span>Auto-switch to 1-Page Mode</span>
+        </label>
+      </div>
+
+      <div class="setting-item">
+        <div class="slider-header">
+          <label for="qualitySlider">JPEG Quality:</label>
+          <span id="qualityVal">75%</span>
+        </div>
+        <input type="range" id="qualitySlider" min="50" max="100" value="75" step="5" />
+      </div>
+
+      <div class="setting-item">
+        <label for="maxPageHeightInput">Max Page Height (px):</label>
+        <input type="number" id="maxPageHeightInput" min="0" step="50" placeholder="e.g. 1000 (0 for original)" />
+      </div>
+
+      <div class="setting-item">
+        <div class="slider-header">
+          <label for="delaySlider">Delay between pages (ms):</label>
+          <span id="delayVal">500ms</span>
+        </div>
+        <input type="range" id="delaySlider" min="100" max="2500" value="500" step="100" />
+      </div>
+
+      <div class="setting-item">
+        <div class="slider-header">
+          <label for="retriesSlider">Max Page Turn Retries:</label>
+          <span id="retriesVal">10</span>
+        </div>
+        <input type="range" id="retriesSlider" min="1" max="15" value="10" step="1" />
+      </div>
+
+      <button class="btn btn-secondary btn-sm" id="saveSettingsBtn" style="margin-top: 8px;">
+        Save Settings
+      </button>
+    </div>
+  </div>
+
+  <!-- Live Activity Console -->
+  <div class="section log-section">
+    <div class="log-header">
+      <span>Activity Log</span>
+      <button class="btn-icon" id="clearLogBtn" title="Clear log">🗑️</button>
+    </div>
+    <div class="log-box" id="logBox">
+      <div class="log-entry info">[Ready] Open a book on Archive.org to start.</div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

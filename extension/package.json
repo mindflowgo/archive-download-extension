@@ -1,0 +1,16 @@
+{
+  "name": "archive-downloader-extension",
+  "version": "1.0.0",
+  "description": "Chrome extension to download, convert, and preserve Archive.org borrowed books to PDFs, images, and Markdown text.",
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:watch": "bun run build.ts --watch",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.312",
+    "@types/node": "^22.13.9",
+    "typescript": "^5.8.2"
+  }
+}
