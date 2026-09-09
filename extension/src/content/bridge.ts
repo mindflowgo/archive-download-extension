@@ -392,7 +392,7 @@ import { BookInfo, BridgeMessage } from '../types';
       case 'FLIP_NEXT': {
         const targetPage = typeof event.data.targetPage === 'number' ? event.data.targetPage : undefined;
         if (br) {
-          try { br.flipSpeed = 0; } catch (e) {}
+          try { br.flipSpeed = 0; br.animating = false; } catch (e) {}
           console.log(`[ArchiveDownloader] Flipping next page via BookReader (target: ${targetPage ?? 'next'})`);
           let flipped = false;
 

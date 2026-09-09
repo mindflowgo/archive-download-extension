@@ -351,6 +351,12 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
       return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
     }
 
+    // Proactively detect Archive.org cross-origin storage nodes (ia*.us.archive.org != archive.org)
+    if (img.src && img.src.includes('archive.org') && !img.src.startsWith(window.location.origin)) {
+      isSiteTainted = true;
+      return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
+    }
+
     let width = img.naturalWidth || img.width || 0;
     let height = img.naturalHeight || img.height || 0;
 
@@ -631,7 +637,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
           await provider.triggerPageFlip(targetPageNum);
         }
 
-        await sleep(100);
+        await sleep(50);
 
         const activeImg = provider.getActivePageImage(300, targetPageNum);
         if (activeImg && activeImg.complete && activeImg.naturalWidth >= 300) {
@@ -771,125 +777,138 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
         console.warn(`[ArchiveDownloader] Page ${pageNum} image timed out.`);
         failedPages++;
       } else {
-        try {
-          lastImgSrc = currentImg.src;
+        const pageToProcess = pageNum;
+        const pageImg = currentImg;
+        const pageImgSrc = currentImg.src;
+        lastImgSrc = pageImgSrc;
 
-          // 1. Capture Image to DataURL (with optional maxPageHeight constraint and tainted canvas recovery)
-          const dataUrl = await captureImageToDataUrl(currentImg, config.imageQuality, config.maxPageHeight);
+        // Calculate final page dimensions
+        let pageW = pageImg.naturalWidth || pageImg.width || 0;
+        let pageH = pageImg.naturalHeight || pageImg.height || 0;
+        if (config.maxPageHeight && config.maxPageHeight > 0 && pageH > config.maxPageHeight) {
+          pageW = Math.round(pageW * (config.maxPageHeight / pageH));
+          pageH = config.maxPageHeight;
+        }
+        const dimensions = { width: pageW, height: pageH };
+        lastDimensions = dimensions;
 
-          // Calculate final page dimensions after downscaling (if maxPageHeight not defined or 0 => use original size)
-          let pageW = currentImg.naturalWidth || currentImg.width || 0;
-          let pageH = currentImg.naturalHeight || currentImg.height || 0;
-          if (config.maxPageHeight && config.maxPageHeight > 0 && pageH > config.maxPageHeight) {
-            pageW = Math.round(pageW * (config.maxPageHeight / pageH));
-            pageH = config.maxPageHeight;
-          }
-          const dimensions = { width: pageW, height: pageH };
-          lastDimensions = dimensions;
+        // GRAB NEXT PAGE IMMEDIATELY: Trigger the flip to pageNum + 1 right now!
+        const nextTurnPromise = (pageNum < endP && !stopRequested)
+          ? turnAndGetNextImage(pageImgSrc, pageNum + 1)
+          : null;
 
-          // Store for PDF compiler (deduplicate by pageNum)
-          if (config.generatePdf) {
-            const existingIdx = collectedImages.findIndex(i => i.pageNum === pageNum);
-            if (existingIdx >= 0) {
-              collectedImages[existingIdx] = {
-                pageNum,
-                data: dataUrl,
-                width: pageW,
-                height: pageH,
-              };
-            } else {
-              collectedImages.push({
-                pageNum,
-                data: dataUrl,
-                width: pageW,
-                height: pageH,
+        // Concurrently capture image data and extract OCR text for pageToProcess
+        const capturePromise = (async () => {
+          try {
+            const [dataUrl, text] = await Promise.all([
+              captureImageToDataUrl(pageImg, config.imageQuality, config.maxPageHeight),
+              config.saveTextMd ? (async () => {
+                try {
+                  let t = await provider.extractPageText(pageToProcess, pageImg);
+                  if (lastHttpError && (Date.now() - lastHttpError.timestamp < 3000)) {
+                    const err = lastHttpError;
+                    lastHttpError = null;
+                    console.warn(`[ArchiveDownloader] OCR text fetch for page ${pageToProcess} encountered HTTP ${err.statusCode}`);
+                    await handleHttpErrorBackoff(err, pageToProcess);
+                    t = await provider.extractPageText(pageToProcess, pageImg);
+                  }
+                  return t;
+                } catch (err: any) {
+                  console.warn(`[ArchiveDownloader] Could not extract text for page ${pageToProcess}:`, err);
+                  return '';
+                }
+              })() : Promise.resolve(''),
+            ]);
+
+            // Store for PDF compiler (deduplicate by pageNum)
+            if (config.generatePdf) {
+              const existingIdx = collectedImages.findIndex(i => i.pageNum === pageToProcess);
+              if (existingIdx >= 0) {
+                collectedImages[existingIdx] = {
+                  pageNum: pageToProcess,
+                  data: dataUrl,
+                  width: pageW,
+                  height: pageH,
+                };
+              } else {
+                collectedImages.push({
+                  pageNum: pageToProcess,
+                  data: dataUrl,
+                  width: pageW,
+                  height: pageH,
+                });
+              }
+            }
+
+            downloadedPages = collectedImages.length;
+
+            // Save individual image file if configured
+            if (config.saveImages) {
+              chrome.runtime.sendMessage({
+                type: 'DOWNLOAD_PAGE_IMAGE',
+                bookTitle,
+                pageNum: pageToProcess,
+                totalPages: endP,
+                dataUrl,
+                subDir,
               });
             }
-          }
 
-          downloadedPages = collectedImages.length;
-
-          // Save individual image file
-          if (config.saveImages) {
-            chrome.runtime.sendMessage({
-              type: 'DOWNLOAD_PAGE_IMAGE',
-              bookTitle,
-              pageNum,
-              totalPages: endP,
-              dataUrl,
-              subDir,
-            });
-          }
-
-          // 2. Extract OCR text if enabled, verifying no HTTP errors occurred
-          if (config.saveTextMd) {
-            try {
-              let text = await provider.extractPageText(pageNum, currentImg);
-              if (lastHttpError && (Date.now() - lastHttpError.timestamp < 3000)) {
-                const err = lastHttpError;
-                lastHttpError = null;
-                console.warn(`[ArchiveDownloader] OCR text fetch for page ${pageNum} encountered HTTP ${err.statusCode}`);
-                await handleHttpErrorBackoff(err, pageNum);
-                text = await provider.extractPageText(pageNum, currentImg);
-              }
-
-              const existingTextIdx = collectedTexts.findIndex(t => t.pageNum === pageNum);
+            // Store OCR text
+            if (config.saveTextMd && text) {
+              const existingTextIdx = collectedTexts.findIndex(t => t.pageNum === pageToProcess);
               if (existingTextIdx >= 0) {
-                collectedTexts[existingTextIdx] = { pageNum, leafIndex: pageNum, text };
+                collectedTexts[existingTextIdx] = { pageNum: pageToProcess, leafIndex: pageToProcess, text };
               } else {
-                collectedTexts.push({ pageNum, leafIndex: pageNum, text });
+                collectedTexts.push({ pageNum: pageToProcess, leafIndex: pageToProcess, text });
               }
-            } catch (err: any) {
-              console.warn(`[ArchiveDownloader] Could not extract text for page ${pageNum}:`, err);
             }
+
+            broadcastState({
+              currentPage: pageToProcess,
+              downloadedPages,
+              currentThumbnail: dataUrl,
+              statusText: `Capturing page ${pageToProcess}`,
+              imageDimensions: dimensions,
+            });
+
+          } catch (err: any) {
+            failedPages++;
+            console.error(`[ArchiveDownloader] Error processing page ${pageToProcess}:`, err);
           }
+        })();
 
-          broadcastState({
-            currentPage: pageNum,
-            downloadedPages,
-            currentThumbnail: dataUrl,
-            statusText: `Capturing page ${pageNum}`,
-            imageDimensions: dimensions,
-          });
+        // Await current page capture and storage
+        await capturePromise;
 
-        } catch (err: any) {
-          failedPages++;
-          console.error(`[ArchiveDownloader] Error processing page ${pageNum}:`, err);
-        }
-      }
+        // If not the last page, wait for the next page flip to resolve
+        if (nextTurnPromise) {
+          const nextImg = await nextTurnPromise;
+          if (!nextImg) {
+            if (isEndOfBook) {
+              console.log(`[ArchiveDownloader] Reached end of book at page ${pageNum}. Finalizing.`);
+              break;
+            }
 
-      // Turn page if not the last page
-      if (pageNum < endP && !stopRequested) {
-        const nextImg = await turnAndGetNextImage(lastImgSrc, pageNum + 1);
-        if (!nextImg) {
-          if (isEndOfBook) {
-            console.log(`[ArchiveDownloader] Reached end of book at page ${pageNum}. Finalizing.`);
+            // Failed after retries: prompt user to save captured pages!
+            console.warn(`[ArchiveDownloader] Could not turn past page ${pageNum}. Prompting user to save.`);
+            const count = collectedImages.length || downloadedPages;
+            if (count > 0) {
+              await handleStopRequest(`Cannot continue past page ${pageNum}. Save all ${count} pages downloaded so far?`);
+            }
             break;
           }
 
-          // Failed after retries: prompt user to save captured pages!
-          console.warn(`[ArchiveDownloader] Could not turn past page ${pageNum}. Prompting user to save.`);
-          const count = collectedImages.length || downloadedPages;
-          if (count > 0) {
-            await handleStopRequest(`Cannot continue past page ${pageNum}. Save all ${count} pages downloaded so far?`);
+          // Next page is ready for the next iteration!
+          currentImg = nextImg;
+
+          // Synchronize page counter if viewer is ahead (Archive.org leaf-jumping)
+          if (provider.siteId !== 'hathitrust') {
+            const domPageNow = provider.getCurrentPage();
+            if (domPageNow !== null && domPageNow > pageNum) {
+              pageNum = domPageNow - 1; // pageNum++ in the for-loop will set pageNum = domPageNow
+            }
           }
-          break;
-        }
-
-        // We already have the next page's verified image ready!
-        currentImg = nextImg;
-
-        // Synchronize page counter if viewer is ahead (Archive.org leaf-jumping)
-        if (provider.siteId !== 'hathitrust') {
-          const domPageNow = provider.getCurrentPage();
-          if (domPageNow !== null && domPageNow > pageNum) {
-            pageNum = domPageNow - 1; // pageNum++ in the for-loop will set pageNum = domPageNow
-          }
-        }
-
-        // Delay between pages
-        if (config.pageDelayMs > 0) {
-          await sleep(config.pageDelayMs);
         }
       }
     }
