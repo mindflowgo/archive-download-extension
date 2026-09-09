@@ -31,7 +31,7 @@ export function parseDjvuXmlToText(xmlString: string): string {
   if (!paragraphMatches || paragraphMatches.length === 0) {
     // If no PARAGRAPH tags, try extracting words directly
     const words = Array.from(xmlString.matchAll(/<WORD[^>]*>([\s\S]*?)<\/WORD>/gi))
-      .map(m => decodeXmlEntities(m[1].trim()))
+      .map(m => decodeHtmlAndXmlEntities(m[1].trim()))
       .filter(Boolean);
     return words.join(' ');
   }

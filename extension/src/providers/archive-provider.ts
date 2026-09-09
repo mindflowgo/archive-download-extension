@@ -43,12 +43,12 @@ export function parseArchiveDomPage(text: string): { current: number; total: num
       total: parseInt(match[2], 10),
     };
   }
-  // 2. Simple slash: (57 / ...)
-  const simpleMatch = text.match(/\((\d+)\s*\//);
-  if (simpleMatch) {
+  // 2. Simple slash with or without parentheses: 57/384 or (57 / 384)
+  const slashMatch = text.match(/(\d+)(?:\s*-\s*\d+)?\s*\/\s*(\d+)/);
+  if (slashMatch) {
     return {
-      current: parseInt(simpleMatch[1], 10),
-      total: 0,
+      current: parseInt(slashMatch[1], 10),
+      total: parseInt(slashMatch[2], 10),
     };
   }
   // 3. "Page 42 of 300"
@@ -59,7 +59,7 @@ export function parseArchiveDomPage(text: string): { current: number; total: num
       total: parseInt(ofMatch[2], 10),
     };
   }
-  // 4. "Page 57"
+  // 4. "Page 57" or "Page — 57"
   const pageMatch = text.match(/page\s*—?\s*(\d+)/i);
   if (pageMatch) {
     return {
@@ -76,6 +76,15 @@ export class ArchiveProvider implements BookProvider {
   readonly defaultStartPage = 0;
 
   private bookInfo: BookInfo | null = null;
+  private textCache = new Map<number, string>();
+  private detectedOffset: number | null = null;
+
+  onArchiveTextReady(page: number, xml: string) {
+    const text = parseDjvuXmlToText(xml);
+    if (text) {
+      this.textCache.set(page, text);
+    }
+  }
 
   isMatch(): boolean {
     return window.location.hostname.includes('archive.org') && window.location.pathname.includes('/details/');
@@ -116,7 +125,7 @@ export class ArchiveProvider implements BookProvider {
   }
 
   getCurrentPage(): number | null {
-    // 1. Check status / page indicator spans across BookReader versions
+    // 1. Check status / page indicator spans across BookReader versions (authoritative: .BRcurrentpage)
     const currentSpan = document.querySelector('.BRcurrentpage, [role="status"], .page-number, .BRpager-counter');
     if (currentSpan && currentSpan.textContent) {
       const parsed = parseArchiveDomPage(currentSpan.textContent);
@@ -125,21 +134,23 @@ export class ArchiveProvider implements BookProvider {
       }
     }
 
-    // 2. Check input fields used for page jumping
-    const pageInput = document.querySelector<HTMLInputElement>('input.BRpageinput, input.page-number-input, input[name="page"]');
-    if (pageInput && pageInput.value) {
-      const val = parseInt(pageInput.value, 10);
-      if (!isNaN(val)) return val;
-    }
-
-    // 3. Active page container in DOM
-    const activeContainer = document.querySelector('.BRpagecontainer.BRpage-visible, .BRpage.active, .BRpagecontainer[data-index]');
-    if (activeContainer) {
-      const idxAttr = activeContainer.getAttribute('data-index') || activeContainer.getAttribute('data-page');
+    // 2. Visible / selected page container in DOM
+    const visibleContainer = document.querySelector(
+      '.BRpagecontainer.BRpage-visible, .BRpagecontainer--hasSelection, .BRpage.active'
+    );
+    if (visibleContainer) {
+      const idxAttr = visibleContainer.getAttribute('data-index') || visibleContainer.getAttribute('data-page');
       if (idxAttr) {
         const val = parseInt(idxAttr, 10);
         if (!isNaN(val)) return val;
       }
+    }
+
+    // 3. Check input fields used for page jumping
+    const pageInput = document.querySelector<HTMLInputElement>('input.BRpageinput, input.page-number-input, input[name="page"]');
+    if (pageInput && pageInput.value) {
+      const val = parseInt(pageInput.value, 10);
+      if (!isNaN(val)) return val;
     }
 
     return null;
@@ -179,67 +190,28 @@ export class ArchiveProvider implements BookProvider {
   }
 
   triggerPageFlip(targetPageNum: number): void {
-    // 1. Direct BookReader API call via bridge (most reliable in MAIN world, supports br.next() & versions)
+    // 1. Direct BookReader API call via bridge (most reliable in MAIN world, supports br.jumpToIndex & versions)
     this.postToBridge('FLIP_NEXT', { targetPage: targetPageNum });
 
-    // 2. DOM button click fallback across multiple BookReader versions
+    // 2. DOM button click fallback across multiple BookReader versions (only if needed)
     const nextBtn = document.querySelector<HTMLButtonElement>(
       'button[title*="Flip right" i], button[aria-label*="Flip right" i], button.navnext, .book-flip-right, .BRnavnext, [aria-label="Next page" i], [data-action="next-page" i], .BRicon_flip_right, button.page-next'
     );
     if (nextBtn) {
       try { nextBtn.click(); } catch (e) {}
     }
-
-    // 3. Keyboard ArrowRight & PageDown events across BookReader versions
-    for (const key of ['ArrowRight', 'PageDown']) {
-      const keyEvent = {
-        bubbles: true,
-        cancelable: true,
-        key,
-        code: key,
-        keyCode: key === 'ArrowRight' ? 39 : 34,
-        which: key === 'ArrowRight' ? 39 : 34,
-      };
-      document.body.dispatchEvent(new KeyboardEvent('keydown', keyEvent));
-      window.dispatchEvent(new KeyboardEvent('keydown', keyEvent));
-    }
   }
 
   getActivePageImage(minWidth = 300, targetPageNum?: number): HTMLImageElement | null {
-    // 1. Query all candidate page images across all BookReader versions
-    const imageSelectors = [
-      '.BRpagecontainer img',
-      'img.BRpageimage',
-      '.BRpage img',
-      '.BRpageview img',
-      'img[class*="BRpage"]',
-      'img[src*="BookReaderImages.php"]',
-      'img[src*="/BookReader/"]',
-      'img[src*="scale="]',
-      'img[src*="zip="]',
-      '.book-page img',
-    ];
-    const images = Array.from(document.querySelectorAll<HTMLImageElement>(imageSelectors.join(', ')));
-    const valid = images.filter(img => img.complete && img.naturalWidth >= minWidth && img.src);
-
-    if (valid.length === 0) return null;
-
-    // 2. If targetPageNum is specified, find the image verified for this specific page
+    // 1. If targetPageNum is specified, find the image verified for this specific page
     if (typeof targetPageNum === 'number') {
-      // 2a. Direct URL filename verification: e.g. file=..._0030.tif => 30 === targetPageNum!
-      for (const img of valid) {
-        const pageFromUrl = parseArchiveImageUrlPage(img.src);
-        if (pageFromUrl !== null && pageFromUrl === targetPageNum) {
-          img.dataset.seq = String(targetPageNum);
-          return img;
-        }
-      }
-
-      // 2b. Direct Target Container Lookup: .BRpagecontainer[data-index="30"] img
+      // 1a. Priority #1: Authoritative Container Lookup for targetPageNum
       const targetSelectors = [
         `.BRpagecontainer[data-index="${targetPageNum}"] img`,
         `.pagediv${targetPageNum} img`,
+        `[data-index="${targetPageNum}"] img.BRpageimage`,
         `[data-index="${targetPageNum}"] img`,
+        `[data-page-num="n${targetPageNum}"] img`,
         `.BRpage[data-page="${targetPageNum}"] img`,
         `.BRpage[data-leaf="${targetPageNum}"] img`,
         `#pagediv${targetPageNum} img`,
@@ -247,49 +219,66 @@ export class ArchiveProvider implements BookProvider {
       ];
       for (const sel of targetSelectors) {
         const el = document.querySelector<HTMLImageElement>(sel);
-        if (el && el.complete && el.naturalWidth >= minWidth && el.src) {
-          const pageFromUrl = parseArchiveImageUrlPage(el.src);
-          if (pageFromUrl === null || pageFromUrl === targetPageNum) {
+        if (el) {
+          // If image is complete and loaded inside target container, IT IS THE TARGET IMAGE!
+          if (el.complete && el.naturalWidth >= minWidth && el.src) {
             el.dataset.seq = String(targetPageNum);
+            // Learn filename offset (e.g. leaf 17 having _0018.tif => offset = 18 - 17 = 1)
+            const fileNum = parseArchiveImageUrlPage(el.src);
+            if (fileNum !== null) {
+              this.detectedOffset = fileNum - targetPageNum;
+            }
             return el;
+          }
+          // Container exists but image is still loading: return null so caller waits for it!
+          return null;
+        }
+      }
+
+      // 1b. Priority #2: If target container not yet rendered in DOM, check visible container if DOM status matches
+      const domPage = this.getCurrentPage();
+      if (domPage !== null && domPage === targetPageNum) {
+        const visibleContainers = Array.from(document.querySelectorAll<HTMLElement>(
+          '.BRpagecontainer.BRpage-visible, .BRpagecontainer--hasSelection, .BRpage.active'
+        ));
+        for (const cont of visibleContainers) {
+          const img = cont.querySelector<HTMLImageElement>('img.BRpageimage, img[class*="BRpage"], img');
+          if (img && img.complete && img.naturalWidth >= minWidth && img.src) {
+            img.dataset.seq = String(targetPageNum);
+            const fileNum = parseArchiveImageUrlPage(img.src);
+            if (fileNum !== null) {
+              this.detectedOffset = fileNum - targetPageNum;
+            }
+            return img;
           }
         }
       }
 
-      // 2c. Inspect viewport images:
-      // CRITICAL: Reject any image whose URL explicitly belongs to a different page!
-      let bestCandidate: HTMLImageElement | null = null;
-      let maxArea = 0;
-      const winW = typeof window !== 'undefined' ? window.innerWidth : 1920;
-      const winH = typeof window !== 'undefined' ? window.innerHeight : 1080;
+      // 1c. Priority #3: URL Filename Matching with calibrated or standard offset
+      const allImages = Array.from(document.querySelectorAll<HTMLImageElement>(
+        'img.BRpageimage, .BRpagecontainer img, .BRpage img, img[src*="BookReaderImages.php"]'
+      )).filter(img => img.complete && img.naturalWidth >= minWidth && img.src);
 
-      for (const img of valid) {
-        const pageFromUrl = parseArchiveImageUrlPage(img.src);
-        if (pageFromUrl !== null && pageFromUrl !== targetPageNum) {
-          continue; // Skip image from a different page (e.g. previous page still visible)
-        }
-
-        const rect = img.getBoundingClientRect();
-        const visibleWidth = Math.max(0, Math.min(rect.right, winW) - Math.max(rect.left, 0));
-        const visibleHeight = Math.max(0, Math.min(rect.bottom, winH) - Math.max(rect.top, 0));
-        const area = visibleWidth * visibleHeight;
-
-        if (area > maxArea && visibleWidth > 50 && visibleHeight > 50) {
-          maxArea = area;
-          bestCandidate = img;
+      for (const img of allImages) {
+        const fileNum = parseArchiveImageUrlPage(img.src);
+        if (fileNum !== null) {
+          const matchesCalibrated = this.detectedOffset !== null && fileNum === targetPageNum + this.detectedOffset;
+          const matchesDefault = this.detectedOffset === null && (fileNum === targetPageNum || fileNum === targetPageNum + 1);
+          if (matchesCalibrated || matchesDefault) {
+            img.dataset.seq = String(targetPageNum);
+            if (this.detectedOffset === null) {
+              this.detectedOffset = fileNum - targetPageNum;
+            }
+            return img;
+          }
         }
       }
 
-      if (bestCandidate) {
-        bestCandidate.dataset.seq = String(targetPageNum);
-        return bestCandidate;
-      }
-
-      // Fallback: If no image specifically has a contradictory URL, return newest DOM image
-      const fallback = valid[valid.length - 1];
+      // Fallback: If no image specifically has a contradictory URL, check latest DOM image
+      const fallback = allImages[allImages.length - 1];
       if (fallback) {
-        const pageFromUrl = parseArchiveImageUrlPage(fallback.src);
-        if (pageFromUrl === null || pageFromUrl === targetPageNum) {
+        const fileNum = parseArchiveImageUrlPage(fallback.src);
+        if (fileNum === null || (this.detectedOffset !== null ? fileNum === targetPageNum + this.detectedOffset : (fileNum === targetPageNum || fileNum === targetPageNum + 1))) {
           fallback.dataset.seq = String(targetPageNum);
           return fallback;
         }
@@ -299,13 +288,27 @@ export class ArchiveProvider implements BookProvider {
       return null;
     }
 
-    // 3. Fallback when no targetPageNum is specified: Pick the largest visible image in viewport
+    // 2. Fallback when no targetPageNum is specified: Pick the largest visible image in viewport
+    const candidateSelectors = [
+      '.BRpagecontainer img',
+      'img.BRpageimage',
+      '.BRpage img',
+      '.BRpageview img',
+      'img[src*="BookReaderImages.php"]',
+      'img[src*="/BookReader/"]',
+      '.book-page img',
+    ];
+    const images = Array.from(document.querySelectorAll<HTMLImageElement>(candidateSelectors.join(', ')))
+      .filter(img => img.complete && img.naturalWidth >= minWidth && img.src);
+
+    if (images.length === 0) return null;
+
     let bestImg: HTMLImageElement | null = null;
     let maxVisibleArea = 0;
     const winW = typeof window !== 'undefined' ? window.innerWidth : 1920;
     const winH = typeof window !== 'undefined' ? window.innerHeight : 1080;
 
-    for (const img of valid) {
+    for (const img of images) {
       const rect = img.getBoundingClientRect();
       const visibleWidth = Math.max(0, Math.min(rect.right, winW) - Math.max(rect.left, 0));
       const visibleHeight = Math.max(0, Math.min(rect.bottom, winH) - Math.max(rect.top, 0));
@@ -317,16 +320,57 @@ export class ArchiveProvider implements BookProvider {
       }
     }
 
-    return bestImg || valid[valid.length - 1] || null;
+    return bestImg || images[images.length - 1] || null;
   }
 
-  async extractPageText(pageNum: number): Promise<string> {
-    if (!this.bookInfo || !this.bookInfo.server || !this.bookInfo.bookPath) {
+  async extractPageText(pageNum: number, img?: HTMLImageElement | null): Promise<string> {
+    // 1. Check if intercepted from BookReader's network call
+    if (this.textCache.has(pageNum)) {
+      return this.textCache.get(pageNum)!;
+    }
+
+    // 2. Wait briefly (up to 200ms) in case BookReader's background request is currently in-flight
+    for (let i = 0; i < 4; i++) {
+      if (this.textCache.has(pageNum)) {
+        return this.textCache.get(pageNum)!;
+      }
+      await new Promise(r => setTimeout(r, 50));
+    }
+    if (this.textCache.has(pageNum)) {
+      return this.textCache.get(pageNum)!;
+    }
+
+    // 3. Derive server and bookPath from bookInfo or dynamically from active page image URL
+    let server = this.bookInfo?.server || '';
+    let bookPath = this.bookInfo?.bookPath || '';
+
+    const candidateSrc = img?.src || this.getActivePageImage(300, pageNum)?.src;
+    if ((!server || !bookPath) && candidateSrc && candidateSrc.includes('BookReaderImages.php')) {
+      try {
+        const u = new URL(candidateSrc);
+        if (!server) server = u.host;
+        const zipParam = u.searchParams.get('zip');
+        const idParam = u.searchParams.get('id');
+        if (!bookPath) {
+          if (zipParam) {
+            bookPath = zipParam.replace(/_[a-zA-Z0-9]+\.zip$/i, '');
+          } else if (idParam) {
+            bookPath = `/0/items/${idParam}/${idParam}`;
+          }
+        }
+        if (this.bookInfo) {
+          if (!this.bookInfo.server && server) this.bookInfo.server = server;
+          if (!this.bookInfo.bookPath && bookPath) this.bookInfo.bookPath = bookPath;
+        }
+      } catch (e) {}
+    }
+
+    if (!server || !bookPath) {
       return '';
     }
 
     const leafIndex = pageNum;
-    const url = `https://${this.bookInfo.server}/BookReader/BookReaderGetTextWrapper.php?path=${encodeURIComponent(this.bookInfo.bookPath)}_djvu.xml&mode=djvu_xml&page=${leafIndex}`;
+    const url = `https://${server}/BookReader/BookReaderGetTextWrapper.php?path=${encodeURIComponent(bookPath)}_djvu.xml&mode=djvu_xml&page=${leafIndex}`;
 
     try {
       const response = await fetch(url, {
@@ -335,7 +379,9 @@ export class ArchiveProvider implements BookProvider {
       });
       if (!response.ok) return '';
       const xml = await response.text();
-      return parseDjvuXmlToText(xml);
+      const text = parseDjvuXmlToText(xml);
+      this.textCache.set(leafIndex, text);
+      return text;
     } catch (err) {
       console.warn(`[ArchiveDownloader] Could not fetch text for leaf ${leafIndex}:`, err);
       return '';

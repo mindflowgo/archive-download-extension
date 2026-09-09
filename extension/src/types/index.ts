@@ -101,4 +101,5 @@ export type BridgeMessage =
   | { direction: 'FROM_BRIDGE'; event: 'HTTP_ERROR'; url: string; statusCode: number; retryAfter?: number }
   | { direction: 'FROM_BRIDGE'; event: 'PAGE_LOAD_ANNOUNCED'; seq: number; isVisible: boolean; isLoaded: boolean }
   | { direction: 'FROM_BRIDGE'; event: 'PAGE_IMAGE_READY'; seq: number; blobUrl: string }
-  | { direction: 'FROM_BRIDGE'; event: 'PAGE_TEXT_READY'; seq: number; html: string };
+  | { direction: 'FROM_BRIDGE'; event: 'PAGE_TEXT_READY'; seq: number; html: string }
+  | { direction: 'FROM_BRIDGE'; event: 'ARCHIVE_TEXT_READY'; page: number; xml: string };

@@ -209,6 +209,14 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
       }
     }
 
+    // Forward Archive.org OCR text to ArchiveProvider
+    if (provider instanceof ArchiveProvider) {
+      if (msg.event === 'ARCHIVE_TEXT_READY') {
+        provider.onArchiveTextReady(msg.page, msg.xml);
+        return;
+      }
+    }
+
     if (msg.event === 'BOOK_INFO') {
       bookInfo = msg.data;
       if (provider instanceof ArchiveProvider) {
@@ -650,22 +658,8 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
           }
 
           const isNewSrc = !lastSrc || activeImg.src !== lastSrc;
-          const parsedUrlPage = parseArchiveImageUrlPage(activeImg.src);
 
-          // 1. Primary verification: Image URL explicitly contains targetPageNum (e.g. _0030.tif -> 30)
-          if (parsedUrlPage !== null && parsedUrlPage === targetPageNum) {
-            currentRetryCount = 0;
-            consecutiveErrorCount = 0;
-            console.log(`[ArchiveDownloader] Page ${targetPageNum} verified from URL (${activeImg.naturalWidth}x${activeImg.naturalHeight}px, leaf ${parsedUrlPage})!`);
-            return activeImg;
-          }
-
-          // If the URL explicitly contains a DIFFERENT page number (e.g. still showing _0029.tif), reject it!
-          if (parsedUrlPage !== null && parsedUrlPage !== targetPageNum) {
-            continue;
-          }
-
-          // 2. Secondary verification: Container/dataset explicitly matches targetPageNum AND image src has changed
+          // 1. Container/dataset explicitly matches targetPageNum AND image src has changed
           const isTargetSeq = activeImg.dataset.seq === String(targetPageNum);
           if (isNewSrc && isTargetSeq) {
             currentRetryCount = 0;
@@ -674,12 +668,21 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
             return activeImg;
           }
 
-          // 3. Tertiary verification: DOM status indicator (e.g. Page — (57/384)) confirms targetPageNum AND image src changed
+          // 2. DOM status indicator (e.g. Page — (57/384)) confirms targetPageNum AND image src changed
           const domNow = provider.getCurrentPage();
           if (domNow !== null && domNow >= targetPageNum && isNewSrc) {
             currentRetryCount = 0;
             consecutiveErrorCount = 0;
             console.log(`[ArchiveDownloader] Page ${targetPageNum} visible [DOM status ${domNow}] (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
+            return activeImg;
+          }
+
+          // 3. Image URL contains targetPageNum or standard +1 offset (e.g. _0018.tif for leaf 17)
+          const parsedUrlPage = parseArchiveImageUrlPage(activeImg.src);
+          if (isNewSrc && parsedUrlPage !== null && (parsedUrlPage === targetPageNum || parsedUrlPage === targetPageNum + 1)) {
+            currentRetryCount = 0;
+            consecutiveErrorCount = 0;
+            console.log(`[ArchiveDownloader] Page ${targetPageNum} verified from URL (${activeImg.naturalWidth}x${activeImg.naturalHeight}px, leaf ${parsedUrlPage})!`);
             return activeImg;
           }
         }

@@ -234,6 +234,55 @@ describe('Archive.org Provider & Multi-Version BookReader Integration', () => {
       const found = provider.getActivePageImage(300, 30);
       expect(found).toBeNull();
     });
+
+    it('should accept image within container [data-index="17"] even when filename is +1 offset (e.g. _0018.tif for leaf 17)', () => {
+      const mockImg17: any = {
+        complete: true,
+        naturalWidth: 1560,
+        naturalHeight: 2348,
+        src: 'https://ia600805.us.archive.org/BookReader/BookReaderImages.php?zip=/0/items/principlesteach01nuttgoog/principlesteach01nuttgoog_tif.zip&file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0018.tif&id=principlesteach01nuttgoog&scale=4&rotate=0',
+        dataset: {},
+        getBoundingClientRect: () => ({ top: 10, bottom: 600, left: 10, right: 600, width: 590, height: 590 }),
+      };
+
+      (globalThis as any).document = {
+        querySelector: (sel: string) => {
+          if (sel.includes('[data-index="17"]') || sel.includes('.pagediv17')) {
+            return mockImg17;
+          }
+          return null;
+        },
+        querySelectorAll: () => [mockImg17],
+      };
+
+      const found = provider.getActivePageImage(300, 17);
+      expect(found).not.toBeNull();
+      expect(found?.dataset.seq).toBe('17');
+      expect(found?.src).toContain('principlesteach01nuttgoog_0018.tif');
+    });
+
+    it('should return null when container [data-index="17"] exists but image has not finished loading', () => {
+      const mockImgLoading: any = {
+        complete: false,
+        naturalWidth: 0,
+        naturalHeight: 0,
+        src: '',
+        dataset: {},
+      };
+
+      (globalThis as any).document = {
+        querySelector: (sel: string) => {
+          if (sel.includes('[data-index="17"]') || sel.includes('.pagediv17')) {
+            return mockImgLoading;
+          }
+          return null;
+        },
+        querySelectorAll: () => [mockImgLoading],
+      };
+
+      const found = provider.getActivePageImage(300, 17);
+      expect(found).toBeNull();
+    });
   });
 
   describe('parseArchiveImageUrlPage & parseArchiveDomPage Utility Tests', () => {
@@ -263,6 +312,46 @@ describe('Archive.org Provider & Multi-Version BookReader Integration', () => {
       const res3 = parseArchiveDomPage('Page 42 of 300');
       expect(res3?.current).toBe(42);
       expect(res3?.total).toBe(300);
+
+      const res4 = parseArchiveDomPage('Page — (17/384)');
+      expect(res4?.current).toBe(17);
+      expect(res4?.total).toBe(384);
+    });
+  });
+
+  describe('Archive.org OCR Text Interception & Extraction', () => {
+    it('should cache and return text from onArchiveTextReady', async () => {
+      const xml = '<DjVuXML><BODY><OBJECT><PARAM name="PAGE" value="principlesteach01nuttgoog_0018.djvu"/><LINE><WORD>Sample</WORD><WORD>text</WORD></LINE></OBJECT></BODY></DjVuXML>';
+      provider.onArchiveTextReady(17, xml);
+
+      const text = await provider.extractPageText(17);
+      expect(text).toBe('Sample text');
+    });
+
+    it('should derive server and bookPath dynamically from BookReaderImages.php URL', async () => {
+      const mockImg: any = {
+        src: 'https://ia600805.us.archive.org/BookReader/BookReaderImages.php?zip=/0/items/principlesteach01nuttgoog/principlesteach01nuttgoog_tif.zip&file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0018.tif&id=principlesteach01nuttgoog&scale=4&rotate=0',
+      };
+
+      let requestedUrl = '';
+      const origFetch = globalThis.fetch;
+      (globalThis as any).fetch = async (url: string) => {
+        requestedUrl = url;
+        return {
+          ok: true,
+          text: async () => '<DjVuXML><BODY><OBJECT><LINE><WORD>Derived</WORD><WORD>path</WORD></LINE></OBJECT></BODY></DjVuXML>',
+        };
+      };
+
+      try {
+        const text = await provider.extractPageText(17, mockImg);
+        expect(requestedUrl).toContain('ia600805.us.archive.org');
+        expect(requestedUrl).toContain('principlesteach01nuttgoog_djvu.xml');
+        expect(requestedUrl).toContain('page=17');
+        expect(text).toBe('Derived path');
+      } finally {
+        (globalThis as any).fetch = origFetch;
+      }
     });
   });
 });

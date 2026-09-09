@@ -118,6 +118,23 @@ import { BookInfo, BridgeMessage } from '../types';
               });
             }).catch(() => {});
           } catch (e) {}
+        } else if (response && response.ok && url.includes('BookReaderGetTextWrapper.php')) {
+          // Intercept Archive.org DjVu OCR XML text directly from BookReader response
+          try {
+            const pageMatch = url.match(/[?&]page=(\d+)/);
+            if (pageMatch) {
+              const page = parseInt(pageMatch[1], 10);
+              const clone = response.clone();
+              clone.text().then((xmlText) => {
+                sendToContentScript({
+                  direction: 'FROM_BRIDGE',
+                  event: 'ARCHIVE_TEXT_READY',
+                  page,
+                  xml: xmlText,
+                });
+              }).catch(() => {});
+            }
+          } catch (e) {}
         }
 
         return response;
@@ -195,6 +212,22 @@ import { BookInfo, BridgeMessage } from '../types';
             statusCode: this.status,
             retryAfter,
           });
+        } else if (this.status === 200) {
+          const url = (this as any)._requestUrl || this.responseURL || '';
+          if (url && url.includes('BookReaderGetTextWrapper.php')) {
+            try {
+              const pageMatch = url.match(/[?&]page=(\d+)/);
+              if (pageMatch) {
+                const page = parseInt(pageMatch[1], 10);
+                sendToContentScript({
+                  direction: 'FROM_BRIDGE',
+                  event: 'ARCHIVE_TEXT_READY',
+                  page,
+                  xml: this.responseText,
+                });
+              }
+            } catch (e) {}
+          }
         }
       });
       return origXhrSend.apply(this, args);
@@ -409,7 +442,7 @@ import { BookInfo, BridgeMessage } from '../types';
           }
 
           // 2. Relative flip methods: br.next({ noAnimate: true, flipSpeed: 0 })
-          if (typeof br.next === 'function') {
+          if (!flipped && typeof br.next === 'function') {
             try {
               br.next({ noAnimate: true, flipSpeed: 0 });
               flipped = true;
@@ -430,12 +463,14 @@ import { BookInfo, BridgeMessage } from '../types';
             }
           }
 
-          // 4. Also trigger DOM Next button click in MAIN world
-          const nextBtn = document.querySelector<HTMLButtonElement>(
-            'button[title*="Flip right" i], button[aria-label*="Flip right" i], button.navnext, .book-flip-right, .BRnavnext, [aria-label="Next page" i], [data-action="next-page" i], .BRicon_flip_right'
-          );
-          if (nextBtn) {
-            try { nextBtn.click(); } catch (e) {}
+          // 4. Also trigger DOM Next button click in MAIN world if not already flipped
+          if (!flipped) {
+            const nextBtn = document.querySelector<HTMLButtonElement>(
+              'button[title*="Flip right" i], button[aria-label*="Flip right" i], button.navnext, .book-flip-right, .BRnavnext, [aria-label="Next page" i], [data-action="next-page" i], .BRicon_flip_right'
+            );
+            if (nextBtn) {
+              try { nextBtn.click(); } catch (e) {}
+            }
           }
 
           if (typeof targetPage === 'number') {
