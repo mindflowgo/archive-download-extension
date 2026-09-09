@@ -766,14 +766,15 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
           // 1. Capture Image to DataURL (with optional maxPageHeight constraint and tainted canvas recovery)
           const dataUrl = await captureImageToDataUrl(currentImg, config.imageQuality, config.maxPageHeight);
 
-          // Calculate final page dimensions after downscaling
-          let pageW = currentImg.naturalWidth;
-          let pageH = currentImg.naturalHeight;
-          if (config.maxPageHeight > 0 && pageH > config.maxPageHeight) {
+          // Calculate final page dimensions after downscaling (if maxPageHeight not defined or 0 => use original size)
+          let pageW = currentImg.naturalWidth || currentImg.width || 0;
+          let pageH = currentImg.naturalHeight || currentImg.height || 0;
+          if (config.maxPageHeight && config.maxPageHeight > 0 && pageH > config.maxPageHeight) {
             pageW = Math.round(pageW * (config.maxPageHeight / pageH));
             pageH = config.maxPageHeight;
           }
-          lastDimensions = { width: pageW, height: pageH };
+          const dimensions = { width: pageW, height: pageH };
+          lastDimensions = dimensions;
 
           // Store for PDF compiler (deduplicate by pageNum)
           if (config.generatePdf) {
