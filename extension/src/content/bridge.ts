@@ -364,6 +364,7 @@ import { BookInfo, BridgeMessage } from '../types';
       case 'SWITCH_MODE_1': {
         if (br) {
           console.log('[ArchiveDownloader] Switching to 1-page mode');
+          try { br.flipSpeed = 0; } catch (e) {}
           if (typeof br.switchMode === 'function') {
             try { br.switchMode(1); } catch (e) {}
           } else if (typeof br.switchReadMode === 'function') {
@@ -383,7 +384,7 @@ import { BookInfo, BridgeMessage } from '../types';
                 data: info,
               });
             }
-          }, 400);
+          }, 300);
         }
         break;
       }
@@ -391,23 +392,35 @@ import { BookInfo, BridgeMessage } from '../types';
       case 'FLIP_NEXT': {
         const targetPage = typeof event.data.targetPage === 'number' ? event.data.targetPage : undefined;
         if (br) {
+          try { br.flipSpeed = 0; } catch (e) {}
           console.log(`[ArchiveDownloader] Flipping next page via BookReader (target: ${targetPage ?? 'next'})`);
           let flipped = false;
 
-          // 1. Primary: br.next() - standard method across BookReader versions
+          // 1. Primary: br.next({ noAnimate: true, flipSpeed: 0 }) for instant flip
           if (typeof br.next === 'function') {
             try {
-              br.next();
+              br.next({ noAnimate: true, flipSpeed: 0 });
               flipped = true;
             } catch (e) {
               try {
-                br.next({ noAnimate: true });
+                br.next();
                 flipped = true;
               } catch (e2) {}
             }
           }
 
-          // 2. Secondary: br.flipRight() or br.right() - legacy versions
+          // 2. Direct jump fallback if targetPage specified
+          if (!flipped && typeof targetPage === 'number') {
+            if (typeof br.jumpToIndex === 'function') {
+              try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
+                try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
+              }
+            } else if (typeof br.jumpToLeaf === 'function') {
+              try { br.jumpToLeaf(targetPage); flipped = true; } catch (e) {}
+            }
+          }
+
+          // 3. Legacy versions: br.flipRight() or br.right()
           if (!flipped) {
             if (typeof br.flipRight === 'function') {
               try { br.flipRight(); flipped = true; } catch (e) {}
@@ -416,21 +429,8 @@ import { BookInfo, BridgeMessage } from '../types';
             }
           }
 
-          // 3. Fallback: direct jump if targetPage is specified and br.next wasn't available
-          if (!flipped && typeof targetPage === 'number') {
-            if (typeof br.jumpToIndex === 'function') {
-              try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
-                try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
-              }
-            } else if (typeof br.jumpToLeaf === 'function') {
-              try { br.jumpToLeaf(targetPage); flipped = true; } catch (e) {}
-            } else if (typeof br.goToPage === 'function') {
-              try { br.goToPage(targetPage); flipped = true; } catch (e) {}
-            }
-          }
-
           if (typeof targetPage === 'number') {
-            setTimeout(() => tagArchiveDomElements(targetPage), 150);
+            setTimeout(() => tagArchiveDomElements(targetPage), 80);
           }
         }
         break;

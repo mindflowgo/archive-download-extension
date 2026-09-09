@@ -33,6 +33,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
   let collectedImages: PdfImageInput[] = [];
   let collectedTexts: PageTextEntry[] = [];
   let isEndOfBook = false;
+  let isSiteTainted = false;
 
   interface HttpErrorInfo {
     statusCode: number;
@@ -87,7 +88,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
     saveTextMd: true,
     imageQuality: 0.75,
     maxPageHeight: localMaxHeight !== null ? Math.max(0, parseInt(localMaxHeight, 10)) : 0,
-    pageDelayMs: 500,
+    pageDelayMs: 200,
     pageChangeTimeoutMs: 10000,
     maxRetries: 10,
     autoSinglePage: true,
@@ -342,9 +343,14 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
   /**
    * Captures image from DOM element to JPEG Data URL using an offscreen canvas.
    * Proportianally downscales if maxPageHeight > 0 and height > maxPageHeight.
-   * If canvas is tainted by cross-origin resources, cleanly recovers via blob fetch/background proxy.
+   * If canvas is tainted by cross-origin resources, flags isSiteTainted and cleanly recovers via background proxy.
    */
   async function captureImageToDataUrl(img: HTMLImageElement, quality = 0.75, maxPageHeight = 0): Promise<string> {
+    // Fast path: if site is already known to use cross-origin/tainted images, bypass canvas entirely!
+    if (isSiteTainted) {
+      return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
+    }
+
     let width = img.naturalWidth || img.width || 0;
     let height = img.naturalHeight || img.height || 0;
 
@@ -366,7 +372,10 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
     } catch (err: any) {
       // Tainted canvas recovery (cross-origin CDN or protected pages)
       if (err.name === 'SecurityError' || String(err).includes('Tainted') || String(err).includes('SecurityError')) {
-        console.warn(`[ArchiveDownloader] Canvas tainted for ${img.src}. Recovering via clean blob fetch...`);
+        if (!isSiteTainted) {
+          isSiteTainted = true;
+          console.log('[ArchiveDownloader] Cross-origin scan detected. Enabling fast background fetch for all subsequent pages.');
+        }
         return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
       }
       throw err;
@@ -410,13 +419,15 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
   async function fetchCleanDataUrl(url: string, quality = 0.75, maxPageHeight = 0): Promise<string> {
     let blob: Blob | null = null;
 
-    // 1. Local fetch (fast path for blob: and CORS-enabled endpoints)
-    try {
-      const res = await fetch(url, { credentials: 'include' });
-      if (res.ok) {
-        blob = await res.blob();
-      }
-    } catch (e) {}
+    // 1. If site is NOT marked tainted, try local fetch first (fast for blob: and CORS-enabled endpoints)
+    if (!isSiteTainted) {
+      try {
+        const res = await fetch(url, { credentials: 'include' });
+        if (res.ok) {
+          blob = await res.blob();
+        }
+      } catch (e) {}
+    }
 
     // 2. Background service worker fetch (immune to CORS restrictions with host_permissions)
     if (!blob) {
