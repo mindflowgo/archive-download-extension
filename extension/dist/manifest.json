@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Archive Downloader",
   "version": "1.0.0",
-  "description": "Download, convert, and liberate Archive.org borrowed books to PDFs, images, and Markdown text.",
+  "description": "Download and archive public books from Internet Archive and HathiTrust into high-resolution PDFs and clean OCR Markdown.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

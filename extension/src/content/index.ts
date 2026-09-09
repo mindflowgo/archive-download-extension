@@ -470,11 +470,18 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
         return null;
       }
 
-      // 2. Check if the page has ALREADY turned forward to or past targetPageNum
+      // 2. Trigger page flip or check if already turned
       const alreadyTurned = domPageBefore !== null && domPageBefore >= targetPageNum;
 
-      if (!alreadyTurned) {
-        console.log(`[ArchiveDownloader] Flipping to page ${targetPageNum} (attempt ${retryAttempt + 1}/${config.maxRetries + 1})...`);
+      if (retryAttempt > 0) {
+        console.log(`[ArchiveDownloader] Retry ${retryAttempt}: re-triggering flip to page ${targetPageNum}...`);
+        await provider.triggerPageFlip(targetPageNum);
+        if (retryAttempt >= 2 && provider.navigateToPage) {
+          // Direct navigation fallback on repeated stall
+          await provider.navigateToPage(targetPageNum);
+        }
+      } else if (!alreadyTurned) {
+        console.log(`[ArchiveDownloader] Flipping to page ${targetPageNum} (attempt 1/${config.maxRetries + 1})...`);
         await provider.triggerPageFlip(targetPageNum);
       } else {
         console.log(`[ArchiveDownloader] DOM indicates page is already on sequence/leaf ${domPageBefore}. Waiting for image.`);
@@ -483,6 +490,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
       // 3. Fast poll with HTTP error rejection
       const checkStart = Date.now();
       const timeoutMs = 5000; // 5 seconds max per flip attempt
+      let nudged = false;
 
       while (Date.now() - checkStart < timeoutMs) {
         if (stopRequested) return null;
@@ -502,6 +510,13 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
 
           // Restart polling after backoff
           break;
+        }
+
+        // If waiting more than 1500ms without the image appearing, send a nudge flip
+        if (!nudged && Date.now() - checkStart > 1500) {
+          nudged = true;
+          console.log(`[ArchiveDownloader] Image not yet confirmed after 1.5s. Re-triggering flip for page ${targetPageNum}...`);
+          await provider.triggerPageFlip(targetPageNum);
         }
 
         await sleep(100);

@@ -250,9 +250,13 @@ import { BookInfo, BridgeMessage } from '../types';
       totalPages = domPageInfo.total;
     }
 
-    // 2. BookReader API methods
+    // 2. BookReader API methods (supporting multiple BookReader versions)
     if (!totalPages && br) {
-      if (typeof br.getNumLeafs === 'function') {
+      if (br.book && typeof br.book.getNumLeafs === 'function') {
+        try { totalPages = br.book.getNumLeafs(); } catch (e) {}
+      }
+
+      if (!totalPages && typeof br.getNumLeafs === 'function') {
         try {
           totalPages = br.getNumLeafs();
         } catch (e) {}
@@ -296,7 +300,7 @@ import { BookInfo, BridgeMessage } from '../types';
     }
 
     const currentMode = (br && typeof br.mode === 'number') ? br.mode : 0;
-    const bookTitle = (br && br.bookTitle) || document.title || 'Archive Book';
+    const bookTitle = (br && br.bookTitle) || (br?.book?.metadata?.title) || document.title || 'Archive Book';
     const bookId = (br && br.bookId) || '';
 
     if (!br && !domPageInfo && !bookId) return null;
@@ -312,6 +316,27 @@ import { BookInfo, BridgeMessage } from '../types';
       isProtected: Boolean(br && br.protected),
       sourceUrl: window.location.href,
     };
+  }
+
+  function tagArchiveDomElements(leaf: number) {
+    try {
+      const selectors = [
+        `.BRpagecontainer[data-index="${leaf}"] img`,
+        `.pagediv${leaf} img`,
+        `[data-index="${leaf}"] img`,
+        `.BRpage[data-page="${leaf}"] img`,
+        `.BRpage[data-leaf="${leaf}"] img`,
+        `#pagediv${leaf} img`,
+        `#page${leaf} img`,
+      ];
+      for (const sel of selectors) {
+        const img = document.querySelector<HTMLImageElement>(sel);
+        if (img) {
+          img.dataset.seq = String(leaf);
+          break;
+        }
+      }
+    } catch (e) {}
   }
 
   // Handle commands from content script
@@ -337,9 +362,13 @@ import { BookInfo, BridgeMessage } from '../types';
       }
 
       case 'SWITCH_MODE_1': {
-        if (br && typeof br.switchMode === 'function') {
+        if (br) {
           console.log('[ArchiveDownloader] Switching to 1-page mode');
-          br.switchMode(1);
+          if (typeof br.switchMode === 'function') {
+            try { br.switchMode(1); } catch (e) {}
+          } else if (typeof br.switchReadMode === 'function') {
+            try { br.switchReadMode(1); } catch (e) {}
+          }
           setTimeout(() => {
             const info = extractBookInfo();
             if (info) {
@@ -360,16 +389,48 @@ import { BookInfo, BridgeMessage } from '../types';
       }
 
       case 'FLIP_NEXT': {
+        const targetPage = typeof event.data.targetPage === 'number' ? event.data.targetPage : undefined;
         if (br) {
-          if (typeof br.canFlipRight === 'function' && !br.canFlipRight()) {
-            console.log('[ArchiveDownloader] BookReader canFlipRight returned false (at end of book)');
-            break;
-          }
-          console.log('[ArchiveDownloader] Flipping next page via BookReader');
+          console.log(`[ArchiveDownloader] Flipping next page via BookReader (target: ${targetPage ?? 'next'})`);
+          let flipped = false;
+
+          // 1. Primary: br.next() - standard method across BookReader versions
           if (typeof br.next === 'function') {
-            br.next();
-          } else if (typeof br.flipRight === 'function') {
-            br.flipRight();
+            try {
+              br.next();
+              flipped = true;
+            } catch (e) {
+              try {
+                br.next({ noAnimate: true });
+                flipped = true;
+              } catch (e2) {}
+            }
+          }
+
+          // 2. Secondary: br.flipRight() or br.right() - legacy versions
+          if (!flipped) {
+            if (typeof br.flipRight === 'function') {
+              try { br.flipRight(); flipped = true; } catch (e) {}
+            } else if (typeof br.right === 'function') {
+              try { br.right(); flipped = true; } catch (e) {}
+            }
+          }
+
+          // 3. Fallback: direct jump if targetPage is specified and br.next wasn't available
+          if (!flipped && typeof targetPage === 'number') {
+            if (typeof br.jumpToIndex === 'function') {
+              try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
+                try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
+              }
+            } else if (typeof br.jumpToLeaf === 'function') {
+              try { br.jumpToLeaf(targetPage); flipped = true; } catch (e) {}
+            } else if (typeof br.goToPage === 'function') {
+              try { br.goToPage(targetPage); flipped = true; } catch (e) {}
+            }
+          }
+
+          if (typeof targetPage === 'number') {
+            setTimeout(() => tagArchiveDomElements(targetPage), 150);
           }
         }
         break;
@@ -379,33 +440,34 @@ import { BookInfo, BridgeMessage } from '../types';
         const leafIndex = typeof event.data.leafIndex === 'number' ? event.data.leafIndex : 0;
         if (br) {
           console.log(`[ArchiveDownloader] Jumping to leaf ${leafIndex}`);
+          let jumped = false;
           if (typeof br.jumpToIndex === 'function') {
-            br.jumpToIndex(leafIndex);
-          } else if (typeof br.jumpToLeaf === 'function') {
-            br.jumpToLeaf(leafIndex);
-          } else if (typeof br.goToPage === 'function') {
-            br.goToPage(leafIndex);
+            try { br.jumpToIndex(leafIndex, { noAnimate: true }); jumped = true; } catch (e) {
+              try { br.jumpToIndex(leafIndex); jumped = true; } catch (e2) {}
+            }
           }
+          if (!jumped && typeof br.jumpToLeaf === 'function') {
+            try { br.jumpToLeaf(leafIndex); jumped = true; } catch (e) {}
+          }
+          if (!jumped && typeof br.goToPage === 'function') {
+            try { br.goToPage(leafIndex); jumped = true; } catch (e) {}
+          }
+          setTimeout(() => tagArchiveDomElements(leafIndex), 200);
         }
         if (leafIndex === 0) {
-          if (br && typeof br.jumpToIndex === 'function') {
-            try { br.jumpToIndex(0); } catch (e) {}
+          if (br && typeof br.first === 'function') {
+            try { br.first(); } catch (e) {}
           }
-          if (br && typeof br.jumpToLeaf === 'function') {
-            try { br.jumpToLeaf(0); } catch (e) {}
-          }
-          document.body.dispatchEvent(new KeyboardEvent('keydown', {
+          const homeEvent = {
             bubbles: true,
             cancelable: true,
             key: 'Home',
             code: 'Home',
-          }));
-          window.dispatchEvent(new KeyboardEvent('keydown', {
-            bubbles: true,
-            cancelable: true,
-            key: 'Home',
-            code: 'Home',
-          }));
+            keyCode: 36,
+            which: 36,
+          };
+          document.body.dispatchEvent(new KeyboardEvent('keydown', homeEvent));
+          window.dispatchEvent(new KeyboardEvent('keydown', homeEvent));
         }
         break;
       }
