@@ -368,6 +368,12 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
     let width = img.naturalWidth || img.width || 0;
     let height = img.naturalHeight || img.height || 0;
 
+    // If image has 0x0 dimensions in DOM, bypass canvas and fetch clean data directly
+    if (width === 0 || height === 0) {
+      console.warn(`[ArchiveDownloader] Image has 0x0 dimensions in DOM (${img.src.slice(-60)}). Recovering via clean fetch...`);
+      return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
+    }
+
     if (maxPageHeight > 0 && height > maxPageHeight) {
       const scale = maxPageHeight / height;
       width = Math.round(width * scale);
@@ -428,6 +434,98 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
       img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
     });
+  }
+
+  function getImageDimensionsFromDataUrl(dataUrl: string): Promise<{ width: number; height: number }> {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.naturalWidth || img.width || 0, height: img.naturalHeight || img.height || 0 });
+      img.onerror = () => resolve({ width: 0, height: 0 });
+      img.src = dataUrl;
+    });
+  }
+
+  /**
+   * Attempts a 1-time re-pull of an image if its DOM element has 0x0 dimensions.
+   * Resolves true intrinsic dimensions using an offscreen Image element and clean fetch.
+   */
+  async function repullImageWithDimensions(src: string, minWidth = 200): Promise<HTMLImageElement | null> {
+    if (!src) return null;
+
+    // 1. Offscreen Image attempt
+    try {
+      const offscreenResult = await new Promise<HTMLImageElement | null>((resolve) => {
+        const testImg = new Image();
+        testImg.crossOrigin = 'anonymous';
+        const timer = setTimeout(() => {
+          testImg.onload = null;
+          testImg.onerror = null;
+          resolve(null);
+        }, 2500);
+        testImg.onload = () => {
+          clearTimeout(timer);
+          if (testImg.naturalWidth >= minWidth || testImg.naturalWidth > 0) {
+            resolve(testImg);
+          } else {
+            resolve(null);
+          }
+        };
+        testImg.onerror = () => {
+          clearTimeout(timer);
+          resolve(null);
+        };
+        testImg.src = src;
+      });
+
+      if (offscreenResult) return offscreenResult;
+    } catch (e) {}
+
+    // 2. Direct clean blob fetch & Image creation
+    try {
+      let blob: Blob | null = null;
+      try {
+        const res = await fetch(src, { credentials: 'include' });
+        if (res.ok) blob = await res.blob();
+      } catch (e) {}
+
+      if (!blob) {
+        try {
+          const res = await fetch(src);
+          if (res.ok) blob = await res.blob();
+        } catch (e) {}
+      }
+
+      if (blob) {
+        const blobUrl = URL.createObjectURL(blob);
+        const repulledImg = await new Promise<HTMLImageElement | null>((resolve) => {
+          const img = new Image();
+          const timer = setTimeout(() => {
+            img.onload = null;
+            img.onerror = null;
+            URL.revokeObjectURL(blobUrl);
+            resolve(null);
+          }, 2500);
+          img.onload = () => {
+            clearTimeout(timer);
+            resolve(img);
+          };
+          img.onerror = () => {
+            clearTimeout(timer);
+            URL.revokeObjectURL(blobUrl);
+            resolve(null);
+          };
+          img.src = blobUrl;
+        });
+
+        if (repulledImg && (repulledImg.naturalWidth >= minWidth || repulledImg.naturalWidth > 0)) {
+          return repulledImg;
+        }
+      }
+    } catch (e: any) {
+      console.warn('[ArchiveDownloader] Re-pulling image failed:', e?.message || e);
+    }
+
+    return null;
   }
 
   async function fetchCleanDataUrl(url: string, quality = 0.75, maxPageHeight = 0): Promise<string> {
@@ -684,13 +782,34 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
 
           const isNewSrc = !lastSrc || activeImg.src !== lastSrc;
           if (isNewSrc) {
+            let targetImg = activeImg;
+
+            // If dimensions are 0x0, try in-DOM decode first
+            if (targetImg.naturalWidth === 0 || targetImg.naturalHeight === 0) {
+              try { await targetImg.decode(); } catch (e) {}
+            }
+
+            // If dimensions are still 0x0, attempt 1-time re-pull
+            if (targetImg.naturalWidth === 0 || targetImg.naturalHeight === 0) {
+              console.warn(
+                `[ArchiveDownloader] Page ${targetPageNum} image in DOM has 0x0 dimensions (${targetImg.src.slice(-60)}). Attempting 1-time re-pull...`
+              );
+              const repulled = await repullImageWithDimensions(targetImg.src, 200);
+              if (repulled && (repulled.naturalWidth > 0 || repulled.naturalHeight > 0)) {
+                targetImg = repulled;
+                console.log(
+                  `[ArchiveDownloader] Page ${targetPageNum} re-pull successful (${targetImg.naturalWidth}x${targetImg.naturalHeight}px)!`
+                );
+              }
+            }
+
             currentRetryCount = 0;
             consecutiveErrorCount = 0;
-            activeImg.dataset.seq = String(targetPageNum);
+            targetImg.dataset.seq = String(targetPageNum);
             const domNow = provider.getCurrentPage();
             const leafInfo = domNow !== null ? ` [DOM page ${domNow}]` : '';
-            console.log(`[ArchiveDownloader] Page ${targetPageNum} image loaded${leafInfo} (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
-            return activeImg;
+            console.log(`[ArchiveDownloader] Page ${targetPageNum} image loaded${leafInfo} (${targetImg.naturalWidth}x${targetImg.naturalHeight}px)!`);
+            return targetImg;
           }
         }
       }
@@ -818,9 +937,22 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
         failedPages++;
       } else {
         const pageToProcess = pageNum;
-        const pageImg = currentImg;
+        let pageImg = currentImg;
         const pageImgSrc = currentImg.src;
         lastImgSrc = pageImgSrc;
+
+        // If pageImg has 0x0 dimensions in DOM, attempt in-DOM decode and 1-time clean re-pull
+        if (!pageImg.naturalWidth || pageImg.naturalWidth === 0 || !pageImg.naturalHeight || pageImg.naturalHeight === 0) {
+          try { await pageImg.decode(); } catch (e) {}
+          if (!pageImg.naturalWidth || pageImg.naturalWidth === 0) {
+            console.warn(`[ArchiveDownloader] Page ${pageToProcess} image has 0x0 dimensions in DOM. Attempting 1-time re-pull...`);
+            const repulled = await repullImageWithDimensions(pageImgSrc, 200);
+            if (repulled && (repulled.naturalWidth > 0 || repulled.naturalHeight > 0)) {
+              pageImg = repulled;
+              console.log(`[ArchiveDownloader] Page ${pageToProcess} dimensions resolved via re-pull (${pageImg.naturalWidth}x${pageImg.naturalHeight}px)!`);
+            }
+          }
+        }
 
         // Calculate final page dimensions
         let pageW = pageImg.naturalWidth || pageImg.width || 0;
@@ -829,7 +961,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
           pageW = Math.round(pageW * (config.maxPageHeight / pageH));
           pageH = config.maxPageHeight;
         }
-        const dimensions = { width: pageW, height: pageH };
+        let dimensions = { width: pageW, height: pageH };
         lastDimensions = dimensions;
 
         // GRAB NEXT PAGE IMMEDIATELY: Trigger the flip to pageNum + 1 right now!
@@ -859,6 +991,22 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
                 }
               })() : Promise.resolve(''),
             ]);
+
+            // Fallback: If pageW or pageH is still 0, recover the real dimensions directly from dataUrl
+            if (pageW === 0 || pageH === 0) {
+              const dataDim = await getImageDimensionsFromDataUrl(dataUrl);
+              if (dataDim.width > 0 && dataDim.height > 0) {
+                pageW = dataDim.width;
+                pageH = dataDim.height;
+                if (config.maxPageHeight && config.maxPageHeight > 0 && pageH > config.maxPageHeight) {
+                  pageW = Math.round(pageW * (config.maxPageHeight / pageH));
+                  pageH = config.maxPageHeight;
+                }
+                dimensions = { width: pageW, height: pageH };
+                lastDimensions = dimensions;
+                console.log(`[ArchiveDownloader] Page ${pageToProcess} dimensions recovered from data URL: ${pageW}x${pageH}px`);
+              }
+            }
 
             // Store for PDF compiler (deduplicate by pageNum)
             if (config.generatePdf) {
@@ -940,15 +1088,8 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
           }
 
           // Next page is ready for the next iteration!
+          // Maintain strict sequential progression: do not artificially skip pages ahead!
           currentImg = nextImg;
-
-          // Synchronize page counter if viewer is ahead (Archive.org leaf-jumping)
-          if (provider.siteId !== 'hathitrust') {
-            const domPageNow = provider.getCurrentPage();
-            if (domPageNow !== null && domPageNow > pageNum) {
-              pageNum = domPageNow - 1; // pageNum++ in the for-loop will set pageNum = domPageNow
-            }
-          }
         }
       }
     }
