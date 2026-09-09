@@ -2,6 +2,74 @@ import { BookProvider } from './types';
 import { BookInfo } from '../types';
 import { parseDjvuXmlToText } from '../utils/markdown-builder';
 
+/**
+ * Extracts page/leaf number from Archive.org image URLs (e.g. _0030.tif -> 30).
+ * Example: file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0030.tif
+ */
+export function parseArchiveImageUrlPage(src: string): number | null {
+  if (!src) return null;
+  // 1. BookReaderImages.php file parameter: e.g. file=..._0030.tif or file=...-0030.jp2
+  const fileMatch = src.match(/[?&]file=[^&]*?[_\-\.](\d+)\.(?:tif|jp2|jpg|jpeg|png)/i);
+  if (fileMatch) {
+    const num = parseInt(fileMatch[1], 10);
+    if (!isNaN(num)) return num;
+  }
+  // 2. Generic leaf filename in URL path: e.g. /principlesteach01nuttgoog_0030.tif
+  const genericMatch = src.match(/[_\-\.](\d{3,6})\.(?:tif|jp2|jpg|jpeg|png)(?:[?&#]|$)/i);
+  if (genericMatch) {
+    const num = parseInt(genericMatch[1], 10);
+    if (!isNaN(num)) return num;
+  }
+  // 3. Explicit page/leaf query parameters: ?page=30 or &leaf=30
+  const paramMatch = src.match(/[?&](?:page|leaf)=(\d+)/i);
+  if (paramMatch) {
+    const num = parseInt(paramMatch[1], 10);
+    if (!isNaN(num)) return num;
+  }
+  return null;
+}
+
+/**
+ * Extracts current and total page from Archive.org DOM indicators.
+ * Example: <span class="BRcurrentpage" role="status">Page — (57/384)</span> -> { current: 57, total: 384 }
+ */
+export function parseArchiveDomPage(text: string): { current: number; total: number } | null {
+  if (!text) return null;
+  // 1. (57/384) or (57 - 58/384) e.g. "Page — (57/384)" or "Pages (1 - 2/515)"
+  const match = text.match(/\((\d+)(?:\s*-\s*\d+)?\s*\/\s*(\d+)\)/);
+  if (match) {
+    return {
+      current: parseInt(match[1], 10),
+      total: parseInt(match[2], 10),
+    };
+  }
+  // 2. Simple slash: (57 / ...)
+  const simpleMatch = text.match(/\((\d+)\s*\//);
+  if (simpleMatch) {
+    return {
+      current: parseInt(simpleMatch[1], 10),
+      total: 0,
+    };
+  }
+  // 3. "Page 42 of 300"
+  const ofMatch = text.match(/(\d+)\s+of\s+(\d+)/i);
+  if (ofMatch) {
+    return {
+      current: parseInt(ofMatch[1], 10),
+      total: parseInt(ofMatch[2], 10),
+    };
+  }
+  // 4. "Page 57"
+  const pageMatch = text.match(/page\s*—?\s*(\d+)/i);
+  if (pageMatch) {
+    return {
+      current: parseInt(pageMatch[1], 10),
+      total: 0,
+    };
+  }
+  return null;
+}
+
 export class ArchiveProvider implements BookProvider {
   readonly siteId = 'archive' as const;
   readonly siteName = 'Archive.org';
@@ -51,21 +119,9 @@ export class ArchiveProvider implements BookProvider {
     // 1. Check status / page indicator spans across BookReader versions
     const currentSpan = document.querySelector('.BRcurrentpage, [role="status"], .page-number, .BRpager-counter');
     if (currentSpan && currentSpan.textContent) {
-      const match = currentSpan.textContent.match(/\((\d+)(?:\s*-\s*\d+)?\s*\/\s*(\d+)\)/);
-      if (match) {
-        return parseInt(match[1], 10);
-      }
-      const simpleMatch = currentSpan.textContent.match(/\((\d+)\s*\//);
-      if (simpleMatch) {
-        return parseInt(simpleMatch[1], 10);
-      }
-      const ofMatch = currentSpan.textContent.match(/(\d+)\s+of\s+(\d+)/i);
-      if (ofMatch) {
-        return parseInt(ofMatch[1], 10);
-      }
-      const slashMatch = currentSpan.textContent.match(/\/\s*(\d+)/);
-      if (slashMatch) {
-        return parseInt(slashMatch[1], 10);
+      const parsed = parseArchiveDomPage(currentSpan.textContent);
+      if (parsed && typeof parsed.current === 'number') {
+        return parsed.current;
       }
     }
 
@@ -150,28 +206,7 @@ export class ArchiveProvider implements BookProvider {
   }
 
   getActivePageImage(minWidth = 300, targetPageNum?: number): HTMLImageElement | null {
-    // 1. Direct Target Container Lookup (supports modern & legacy BookReader versions)
-    if (typeof targetPageNum === 'number') {
-      const targetSelectors = [
-        `.BRpagecontainer[data-index="${targetPageNum}"] img`,
-        `.pagediv${targetPageNum} img`,
-        `[data-index="${targetPageNum}"] img`,
-        `.BRpage[data-page="${targetPageNum}"] img`,
-        `.BRpage[data-leaf="${targetPageNum}"] img`,
-        `#pagediv${targetPageNum} img`,
-        `#page${targetPageNum} img`,
-        `img[data-seq="${targetPageNum}"]`,
-      ];
-      for (const sel of targetSelectors) {
-        const el = document.querySelector<HTMLImageElement>(sel);
-        if (el && el.complete && el.naturalWidth >= minWidth && el.src) {
-          el.dataset.seq = String(targetPageNum);
-          return el;
-        }
-      }
-    }
-
-    // 2. Query all candidate page images across all BookReader versions
+    // 1. Query all candidate page images across all BookReader versions
     const imageSelectors = [
       '.BRpagecontainer img',
       'img.BRpageimage',
@@ -189,25 +224,82 @@ export class ArchiveProvider implements BookProvider {
 
     if (valid.length === 0) return null;
 
-    // 3. If targetPageNum is specified, find any image whose parent/container or dataset matches targetPageNum
+    // 2. If targetPageNum is specified, find the image verified for this specific page
     if (typeof targetPageNum === 'number') {
-      const match = valid.find(img => {
-        if (img.dataset.seq === String(targetPageNum)) return true;
-        const container = img.closest('.BRpagecontainer, .BRpage, [data-index], [data-page]');
-        if (container) {
-          const idx = container.getAttribute('data-index') || container.getAttribute('data-page') || container.getAttribute('data-leaf');
-          if (idx === String(targetPageNum)) return true;
-          if (container.classList.contains(`pagediv${targetPageNum}`) || container.classList.contains(`p${targetPageNum}`)) return true;
+      // 2a. Direct URL filename verification: e.g. file=..._0030.tif => 30 === targetPageNum!
+      for (const img of valid) {
+        const pageFromUrl = parseArchiveImageUrlPage(img.src);
+        if (pageFromUrl !== null && pageFromUrl === targetPageNum) {
+          img.dataset.seq = String(targetPageNum);
+          return img;
         }
-        return false;
-      });
-      if (match) {
-        match.dataset.seq = String(targetPageNum);
-        return match;
       }
+
+      // 2b. Direct Target Container Lookup: .BRpagecontainer[data-index="30"] img
+      const targetSelectors = [
+        `.BRpagecontainer[data-index="${targetPageNum}"] img`,
+        `.pagediv${targetPageNum} img`,
+        `[data-index="${targetPageNum}"] img`,
+        `.BRpage[data-page="${targetPageNum}"] img`,
+        `.BRpage[data-leaf="${targetPageNum}"] img`,
+        `#pagediv${targetPageNum} img`,
+        `#page${targetPageNum} img`,
+      ];
+      for (const sel of targetSelectors) {
+        const el = document.querySelector<HTMLImageElement>(sel);
+        if (el && el.complete && el.naturalWidth >= minWidth && el.src) {
+          const pageFromUrl = parseArchiveImageUrlPage(el.src);
+          if (pageFromUrl === null || pageFromUrl === targetPageNum) {
+            el.dataset.seq = String(targetPageNum);
+            return el;
+          }
+        }
+      }
+
+      // 2c. Inspect viewport images:
+      // CRITICAL: Reject any image whose URL explicitly belongs to a different page!
+      let bestCandidate: HTMLImageElement | null = null;
+      let maxArea = 0;
+      const winW = typeof window !== 'undefined' ? window.innerWidth : 1920;
+      const winH = typeof window !== 'undefined' ? window.innerHeight : 1080;
+
+      for (const img of valid) {
+        const pageFromUrl = parseArchiveImageUrlPage(img.src);
+        if (pageFromUrl !== null && pageFromUrl !== targetPageNum) {
+          continue; // Skip image from a different page (e.g. previous page still visible)
+        }
+
+        const rect = img.getBoundingClientRect();
+        const visibleWidth = Math.max(0, Math.min(rect.right, winW) - Math.max(rect.left, 0));
+        const visibleHeight = Math.max(0, Math.min(rect.bottom, winH) - Math.max(rect.top, 0));
+        const area = visibleWidth * visibleHeight;
+
+        if (area > maxArea && visibleWidth > 50 && visibleHeight > 50) {
+          maxArea = area;
+          bestCandidate = img;
+        }
+      }
+
+      if (bestCandidate) {
+        bestCandidate.dataset.seq = String(targetPageNum);
+        return bestCandidate;
+      }
+
+      // Fallback: If no image specifically has a contradictory URL, return newest DOM image
+      const fallback = valid[valid.length - 1];
+      if (fallback) {
+        const pageFromUrl = parseArchiveImageUrlPage(fallback.src);
+        if (pageFromUrl === null || pageFromUrl === targetPageNum) {
+          fallback.dataset.seq = String(targetPageNum);
+          return fallback;
+        }
+      }
+
+      // Target page image not yet loaded in DOM
+      return null;
     }
 
-    // 4. Viewport visibility scoring: Pick the image with the largest visible area on screen
+    // 3. Fallback when no targetPageNum is specified: Pick the largest visible image in viewport
     let bestImg: HTMLImageElement | null = null;
     let maxVisibleArea = 0;
     const winW = typeof window !== 'undefined' ? window.innerWidth : 1920;
@@ -225,19 +317,7 @@ export class ArchiveProvider implements BookProvider {
       }
     }
 
-    if (bestImg) {
-      if (typeof targetPageNum === 'number') {
-        bestImg.dataset.seq = String(targetPageNum);
-      }
-      return bestImg;
-    }
-
-    // 5. Fallback: Latest valid image in DOM order (newest page)
-    const fallback = valid[valid.length - 1];
-    if (fallback && typeof targetPageNum === 'number') {
-      fallback.dataset.seq = String(targetPageNum);
-    }
-    return fallback;
+    return bestImg || valid[valid.length - 1] || null;
   }
 
   async extractPageText(pageNum: number): Promise<string> {
@@ -280,15 +360,10 @@ export class ArchiveProvider implements BookProvider {
   }
 
   private extractPageInfoFromDom(): { current: number; total: number } | null {
-    const pageEl = document.querySelector('.BRcurrentpage') || document.querySelector('[role="status"]');
+    const pageEl = document.querySelector('.BRcurrentpage, [role="status"]');
     if (pageEl && pageEl.textContent) {
-      const match = pageEl.textContent.match(/\((\d+)\s*\/\s*(\d+)\)/);
-      if (match) {
-        return {
-          current: parseInt(match[1], 10),
-          total: parseInt(match[2], 10),
-        };
-      }
+      const parsed = parseArchiveDomPage(pageEl.textContent);
+      if (parsed) return parsed;
     }
     return null;
   }

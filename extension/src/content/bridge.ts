@@ -396,7 +396,19 @@ import { BookInfo, BridgeMessage } from '../types';
           console.log(`[ArchiveDownloader] Flipping next page via BookReader (target: ${targetPage ?? 'next'})`);
           let flipped = false;
 
-          // 1. Primary: br.next({ noAnimate: true, flipSpeed: 0 }) for instant flip
+          // 1. If targetPage is specified, try direct leaf jump first
+          if (typeof targetPage === 'number') {
+            if (typeof br.jumpToIndex === 'function') {
+              try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
+                try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
+              }
+            }
+            if (!flipped && typeof br.jumpToLeaf === 'function') {
+              try { br.jumpToLeaf(targetPage); flipped = true; } catch (e) {}
+            }
+          }
+
+          // 2. Relative flip methods: br.next({ noAnimate: true, flipSpeed: 0 })
           if (typeof br.next === 'function') {
             try {
               br.next({ noAnimate: true, flipSpeed: 0 });
@@ -409,17 +421,6 @@ import { BookInfo, BridgeMessage } from '../types';
             }
           }
 
-          // 2. Direct jump fallback if targetPage specified
-          if (!flipped && typeof targetPage === 'number') {
-            if (typeof br.jumpToIndex === 'function') {
-              try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
-                try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
-              }
-            } else if (typeof br.jumpToLeaf === 'function') {
-              try { br.jumpToLeaf(targetPage); flipped = true; } catch (e) {}
-            }
-          }
-
           // 3. Legacy versions: br.flipRight() or br.right()
           if (!flipped) {
             if (typeof br.flipRight === 'function') {
@@ -427,6 +428,14 @@ import { BookInfo, BridgeMessage } from '../types';
             } else if (typeof br.right === 'function') {
               try { br.right(); flipped = true; } catch (e) {}
             }
+          }
+
+          // 4. Also trigger DOM Next button click in MAIN world
+          const nextBtn = document.querySelector<HTMLButtonElement>(
+            'button[title*="Flip right" i], button[aria-label*="Flip right" i], button.navnext, .book-flip-right, .BRnavnext, [aria-label="Next page" i], [data-action="next-page" i], .BRicon_flip_right'
+          );
+          if (nextBtn) {
+            try { nextBtn.click(); } catch (e) {}
           }
 
           if (typeof targetPage === 'number') {

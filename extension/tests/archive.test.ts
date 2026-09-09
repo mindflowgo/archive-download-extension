@@ -186,5 +186,83 @@ describe('Archive.org Provider & Multi-Version BookReader Integration', () => {
       expect(found?.src).toBe('https://archive.org/leaf_b.jpg');
       expect(found?.dataset.seq).toBe('5');
     });
+
+    it('should match image by URL filename when targetPageNum matches (e.g. _0030.tif -> 30)', () => {
+      const mockImgOld: any = {
+        complete: true,
+        naturalWidth: 1560,
+        naturalHeight: 2348,
+        src: 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?zip=/0/items/principlesteach01nuttgoog/principlesteach01nuttgoog_tif.zip&file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0029.tif&id=principlesteach01nuttgoog&scale=4&rotate=0',
+        dataset: {},
+        getBoundingClientRect: () => ({ top: 10, bottom: 600, left: 10, right: 600, width: 590, height: 590 }),
+      };
+      const mockImgTarget: any = {
+        complete: true,
+        naturalWidth: 1560,
+        naturalHeight: 2348,
+        src: 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?zip=/0/items/principlesteach01nuttgoog/principlesteach01nuttgoog_tif.zip&file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0030.tif&id=principlesteach01nuttgoog&scale=4&rotate=0',
+        dataset: {},
+        getBoundingClientRect: () => ({ top: 10, bottom: 600, left: 10, right: 600, width: 590, height: 590 }),
+      };
+
+      (globalThis as any).document = {
+        querySelector: () => null,
+        querySelectorAll: () => [mockImgOld, mockImgTarget],
+      };
+
+      const found = provider.getActivePageImage(300, 30);
+      expect(found).not.toBeNull();
+      expect(found?.src).toContain('principlesteach01nuttgoog_0030.tif');
+      expect(found?.dataset.seq).toBe('30');
+    });
+
+    it('should REJECT image if its URL filename explicitly belongs to an earlier page (e.g. still showing _0029.tif when 30 is requested)', () => {
+      const mockImgOld: any = {
+        complete: true,
+        naturalWidth: 1560,
+        naturalHeight: 2348,
+        src: 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?zip=/0/items/principlesteach01nuttgoog/principlesteach01nuttgoog_tif.zip&file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0029.tif&id=principlesteach01nuttgoog&scale=4&rotate=0',
+        dataset: {},
+        getBoundingClientRect: () => ({ top: 10, bottom: 600, left: 10, right: 600, width: 590, height: 590 }),
+      };
+
+      (globalThis as any).document = {
+        querySelector: () => null,
+        querySelectorAll: () => [mockImgOld],
+      };
+
+      const found = provider.getActivePageImage(300, 30);
+      expect(found).toBeNull();
+    });
+  });
+
+  describe('parseArchiveImageUrlPage & parseArchiveDomPage Utility Tests', () => {
+    it('should parse leaf number from Archive.org BookReaderImages.php file parameter', async () => {
+      const { parseArchiveImageUrlPage } = await import('../src/providers/archive-provider');
+      const url30 = 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?zip=/0/items/principlesteach01nuttgoog/principlesteach01nuttgoog_tif.zip&file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0030.tif&id=principlesteach01nuttgoog&scale=4&rotate=0';
+      expect(parseArchiveImageUrlPage(url30)).toBe(30);
+
+      const url0 = 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?zip=/items/book/book_tif.zip&file=book_tif/book_0000.tif&id=book&scale=4&rotate=0';
+      expect(parseArchiveImageUrlPage(url0)).toBe(0);
+
+      const url57 = 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?zip=/items/book/book_jp2.zip&file=book_jp2/book_0057.jp2&id=book&scale=4&rotate=0';
+      expect(parseArchiveImageUrlPage(url57)).toBe(57);
+    });
+
+    it('should parse page and total from DOM status HTML (e.g. Page — (57/384))', async () => {
+      const { parseArchiveDomPage } = await import('../src/providers/archive-provider');
+      const res1 = parseArchiveDomPage('Page — (57/384)');
+      expect(res1).not.toBeNull();
+      expect(res1?.current).toBe(57);
+      expect(res1?.total).toBe(384);
+
+      const res2 = parseArchiveDomPage('(1/515)');
+      expect(res2?.current).toBe(1);
+      expect(res2?.total).toBe(515);
+
+      const res3 = parseArchiveDomPage('Page 42 of 300');
+      expect(res3?.current).toBe(42);
+      expect(res3?.total).toBe(300);
+    });
   });
 });

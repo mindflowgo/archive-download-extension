@@ -8,7 +8,7 @@ import { FloatingPill } from './pill';
 import { parseDjvuXmlToText, buildBookMarkdown, PageTextEntry } from '../utils/markdown-builder';
 import { compileJpegsToPdf, PdfImageInput } from '../utils/pdf-builder';
 import { formatSubdir, formatPageFilename, sanitizeFilename } from '../utils/sanitizer';
-import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } from '../providers';
+import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, parseArchiveImageUrlPage, parseArchiveDomPage } from '../providers';
 
 (function initContentScript() {
   console.log('[ArchiveDownloader] Initialized on', window.location.href);
@@ -630,28 +630,56 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
           break;
         }
 
-        // If waiting more than 1500ms without the image appearing, send a nudge flip
-        if (!nudged && Date.now() - checkStart > 1500) {
+        // If waiting more than 1000ms without the image appearing, send a nudge flip and direct jump
+        if (!nudged && Date.now() - checkStart > 1000) {
           nudged = true;
-          console.log(`[ArchiveDownloader] Image not yet confirmed after 1.5s. Re-triggering flip for page ${targetPageNum}...`);
+          console.log(`[ArchiveDownloader] Image not yet confirmed after 1.0s. Nudging flip/jump to page ${targetPageNum}...`);
           await provider.triggerPageFlip(targetPageNum);
+          if (provider.navigateToPage) {
+            await provider.navigateToPage(targetPageNum);
+          }
         }
 
         await sleep(50);
 
         const activeImg = provider.getActivePageImage(300, targetPageNum);
-        if (activeImg && activeImg.complete && activeImg.naturalWidth >= 300) {
+        if (activeImg && activeImg.complete && activeImg.naturalWidth >= 300 && activeImg.src) {
           // Double check no pending HTTP error before accepting image
           if (lastHttpError && (Date.now() - lastHttpError.timestamp < 3000)) {
             continue; // Do not accept image when error is pending!
           }
 
-          // As soon as the image is visible with a new src (or confirmed matching targetPageNum), return it!
+          const isNewSrc = !lastSrc || activeImg.src !== lastSrc;
+          const parsedUrlPage = parseArchiveImageUrlPage(activeImg.src);
+
+          // 1. Primary verification: Image URL explicitly contains targetPageNum (e.g. _0030.tif -> 30)
+          if (parsedUrlPage !== null && parsedUrlPage === targetPageNum) {
+            currentRetryCount = 0;
+            consecutiveErrorCount = 0;
+            console.log(`[ArchiveDownloader] Page ${targetPageNum} verified from URL (${activeImg.naturalWidth}x${activeImg.naturalHeight}px, leaf ${parsedUrlPage})!`);
+            return activeImg;
+          }
+
+          // If the URL explicitly contains a DIFFERENT page number (e.g. still showing _0029.tif), reject it!
+          if (parsedUrlPage !== null && parsedUrlPage !== targetPageNum) {
+            continue;
+          }
+
+          // 2. Secondary verification: Container/dataset explicitly matches targetPageNum AND image src has changed
           const isTargetSeq = activeImg.dataset.seq === String(targetPageNum);
-          if (activeImg.src && (activeImg.src !== lastSrc || isTargetSeq)) {
+          if (isNewSrc && isTargetSeq) {
             currentRetryCount = 0;
             consecutiveErrorCount = 0;
             console.log(`[ArchiveDownloader] Page ${targetPageNum} visible (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
+            return activeImg;
+          }
+
+          // 3. Tertiary verification: DOM status indicator (e.g. Page — (57/384)) confirms targetPageNum AND image src changed
+          const domNow = provider.getCurrentPage();
+          if (domNow !== null && domNow >= targetPageNum && isNewSrc) {
+            currentRetryCount = 0;
+            consecutiveErrorCount = 0;
+            console.log(`[ArchiveDownloader] Page ${targetPageNum} visible [DOM status ${domNow}] (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
             return activeImg;
           }
         }
