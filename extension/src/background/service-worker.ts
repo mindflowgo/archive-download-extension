@@ -187,6 +187,32 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
       break;
     }
 
+    case 'FETCH_IMAGE_DATA_URL': {
+      const { url } = message;
+      fetch(url, { credentials: 'include' })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          const buffer = await blob.arrayBuffer();
+          let binary = '';
+          const bytes = new Uint8Array(buffer);
+          const len = bytes.byteLength;
+          const chunkSize = 8192;
+          for (let i = 0; i < len; i += chunkSize) {
+            const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
+            binary += String.fromCharCode.apply(null, chunk as any);
+          }
+          const base64 = btoa(binary);
+          const mime = blob.type || 'image/jpeg';
+          sendResponse({ success: true, dataUrl: `data:${mime};base64,${base64}` });
+        })
+        .catch((err) => {
+          console.warn('[ArchiveDownloader] Background image fetch failed for:', url, err);
+          sendResponse({ success: false, error: String(err) });
+        });
+      return true;
+    }
+
     case 'GET_STATE': {
       sendResponse({ success: true, state: activeState });
       break;

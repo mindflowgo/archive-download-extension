@@ -86,7 +86,8 @@ export type ExtensionMessage =
   | { type: 'OPEN_DOWNLOAD' }
   | { type: 'CLEANUP_IMAGES' }
   | { type: 'PAGE_CAPTURED'; pageNum: number; totalPages: number; thumbnail: string }
-  | { type: 'HTTP_ERROR_DETECTED'; url: string; statusCode: number; retryAfter?: number };
+  | { type: 'HTTP_ERROR_DETECTED'; url: string; statusCode: number; retryAfter?: number }
+  | { type: 'FETCH_IMAGE_DATA_URL'; url: string };
 
 // Bridge (MAIN world) <-> Content script (ISOLATED world) messages via window.postMessage
 export type BridgeMessage =

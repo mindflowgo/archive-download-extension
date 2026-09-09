@@ -342,10 +342,11 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
   /**
    * Captures image from DOM element to JPEG Data URL using an offscreen canvas.
    * Proportianally downscales if maxPageHeight > 0 and height > maxPageHeight.
+   * If canvas is tainted by cross-origin resources, cleanly recovers via blob fetch/background proxy.
    */
-  function captureImageToDataUrl(img: HTMLImageElement, quality = 0.75, maxPageHeight = 0): string {
-    let width = img.naturalWidth;
-    let height = img.naturalHeight;
+  async function captureImageToDataUrl(img: HTMLImageElement, quality = 0.75, maxPageHeight = 0): Promise<string> {
+    let width = img.naturalWidth || img.width || 0;
+    let height = img.naturalHeight || img.height || 0;
 
     if (maxPageHeight > 0 && height > maxPageHeight) {
       const scale = maxPageHeight / height;
@@ -353,14 +354,114 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
       height = maxPageHeight;
     }
 
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Could not obtain canvas 2D context');
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not obtain canvas 2D context');
 
-    ctx.drawImage(img, 0, 0, width, height);
-    return canvas.toDataURL('image/jpeg', quality);
+      ctx.drawImage(img, 0, 0, width, height);
+      return canvas.toDataURL('image/jpeg', quality);
+    } catch (err: any) {
+      // Tainted canvas recovery (cross-origin CDN or protected pages)
+      if (err.name === 'SecurityError' || String(err).includes('Tainted') || String(err).includes('SecurityError')) {
+        console.warn(`[ArchiveDownloader] Canvas tainted for ${img.src}. Recovering via clean blob fetch...`);
+        return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
+      }
+      throw err;
+    }
+  }
+
+  function blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function scaleDataUrl(dataUrl: string, quality = 0.75, maxPageHeight = 0): Promise<string> {
+    if (maxPageHeight <= 0) return dataUrl;
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.naturalWidth;
+        let height = img.naturalHeight;
+        if (height > maxPageHeight) {
+          const scale = maxPageHeight / height;
+          width = Math.round(width * scale);
+          height = maxPageHeight;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(dataUrl);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  async function fetchCleanDataUrl(url: string, quality = 0.75, maxPageHeight = 0): Promise<string> {
+    let blob: Blob | null = null;
+
+    // 1. Local fetch (fast path for blob: and CORS-enabled endpoints)
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (res.ok) {
+        blob = await res.blob();
+      }
+    } catch (e) {}
+
+    // 2. Background service worker fetch (immune to CORS restrictions with host_permissions)
+    if (!blob) {
+      try {
+        const bgRes: any = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            { type: 'FETCH_IMAGE_DATA_URL', url },
+            (response) => resolve(response || { success: false })
+          );
+        });
+        if (bgRes && bgRes.success && bgRes.dataUrl) {
+          if (maxPageHeight <= 0) {
+            return bgRes.dataUrl;
+          }
+          return await scaleDataUrl(bgRes.dataUrl, quality, maxPageHeight);
+        }
+      } catch (e) {}
+    }
+
+    if (blob) {
+      if (maxPageHeight <= 0) {
+        return await blobToDataUrl(blob);
+      }
+      try {
+        const bitmap = await createImageBitmap(blob);
+        let width = bitmap.width;
+        let height = bitmap.height;
+        if (maxPageHeight > 0 && height > maxPageHeight) {
+          const scale = maxPageHeight / height;
+          width = Math.round(width * scale);
+          height = maxPageHeight;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(bitmap, 0, 0, width, height);
+          return canvas.toDataURL('image/jpeg', quality);
+        }
+      } catch (e) {}
+      return await blobToDataUrl(blob);
+    }
+
+    throw new Error(`Failed to export image from ${url}`);
   }
 
   /**
@@ -662,8 +763,8 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider } 
         try {
           lastImgSrc = currentImg.src;
 
-          // 1. Capture Image to DataURL (with optional maxPageHeight constraint)
-          const dataUrl = captureImageToDataUrl(currentImg, config.imageQuality, config.maxPageHeight);
+          // 1. Capture Image to DataURL (with optional maxPageHeight constraint and tainted canvas recovery)
+          const dataUrl = await captureImageToDataUrl(currentImg, config.imageQuality, config.maxPageHeight);
 
           // Calculate final page dimensions after downscaling
           let pageW = currentImg.naturalWidth;
