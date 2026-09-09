@@ -33,17 +33,19 @@ Archiving books from digital libraries often requires clunky CLI scripts, Python
 
 ## Quick Installation
 
-### 1. Load in Chrome or Brave
-1. Download or clone this repository:
-   ```bash
-   git clone https://github.com/your-username/archive_download.git
-   ```
-2. Open `chrome://extensions` (or `brave://extensions`) in your browser.
-3. Enable **Developer mode** in the top-right corner.
-4. Click **Load unpacked** and select the [`extension/dist`](extension/dist) folder.
+### Option A: Download Pre-Built Extension (Fastest)
+1. Download **`archive-downloader.zip`** from the latest [GitHub Releases](https://github.com/mindflowgo/archive-download-extension/releases) or the latest [GitHub Actions Artifacts](https://github.com/mindflowgo/archive-download-extension/actions).
+2. Unzip `archive-downloader.zip` into a folder.
+3. Open `chrome://extensions` (or `brave://extensions`) in your browser.
+4. Enable **Developer mode** in the top-right corner.
+5. Click **Load unpacked** and select the unzipped folder.
 
-### 2. Building from Source (Optional)
-If you make changes to the TypeScript source:
+### Option B: Build from Source
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/mindflowgo/archive-download-extension.git
+   ```
+2. Install dependencies & build:
 ```bash
 # Install dependencies (requires Bun or Node)
 bun install
