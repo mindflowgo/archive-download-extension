@@ -388,7 +388,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
       if (err.name === 'SecurityError' || String(err).includes('Tainted') || String(err).includes('SecurityError')) {
         if (!isSiteTainted) {
           isSiteTainted = true;
-          console.log('[ArchiveDownloader] Cross-origin scan detected. Enabling fast background fetch for all subsequent pages.');
+          console.log('[ArchiveDownloader] Cross-origin scan detected. Enabling direct fetch for all subsequent pages.');
         }
         return await fetchCleanDataUrl(img.src, quality, maxPageHeight);
       }
@@ -400,7 +400,7 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
+      reader.onerror = (e) => reject(new Error('FileReader failed to convert blob to data URL: ' + e));
       reader.readAsDataURL(blob);
     });
   }
@@ -433,19 +433,36 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
   async function fetchCleanDataUrl(url: string, quality = 0.75, maxPageHeight = 0): Promise<string> {
     let blob: Blob | null = null;
 
-    // 1. If site is NOT marked tainted, try local fetch first (fast for blob: and CORS-enabled endpoints)
-    if (!isSiteTainted) {
-      try {
-        const res = await fetch(url, { credentials: 'include' });
-        if (res.ok) {
-          blob = await res.blob();
-        }
-      } catch (e) {}
+    // 1. Direct fetch from content script context (runs within page origin e.g. archive.org with native cookies)
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (res.ok) {
+        blob = await res.blob();
+      } else {
+        console.warn(`[ArchiveDownloader] Content script fetch returned status ${res.status} for ${url}`);
+      }
+    } catch (e: any) {
+      console.warn(`[ArchiveDownloader] Content script credentialed fetch failed (${e?.message || e}). Retrying without credentials...`);
     }
 
-    // 2. Background service worker fetch (immune to CORS restrictions with host_permissions)
+    // 2. Direct fetch without credentials fallback
     if (!blob) {
       try {
+        const res = await fetch(url);
+        if (res.ok) {
+          blob = await res.blob();
+        } else {
+          console.warn(`[ArchiveDownloader] Content script uncredentialed fetch status: ${res.status}`);
+        }
+      } catch (e: any) {
+        console.warn(`[ArchiveDownloader] Content script uncredentialed fetch failed:`, e?.message || e);
+      }
+    }
+
+    // 3. Background service worker fetch fallback (uses extension host_permissions)
+    if (!blob) {
+      try {
+        console.log('[ArchiveDownloader] Attempting background service-worker fetch fallback...');
         const bgRes: any = await new Promise((resolve) => {
           chrome.runtime.sendMessage(
             { type: 'FETCH_IMAGE_DATA_URL', url },
@@ -453,12 +470,17 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
           );
         });
         if (bgRes && bgRes.success && bgRes.dataUrl) {
+          console.log('[ArchiveDownloader] Background service-worker fetch succeeded.');
           if (maxPageHeight <= 0) {
             return bgRes.dataUrl;
           }
           return await scaleDataUrl(bgRes.dataUrl, quality, maxPageHeight);
+        } else if (bgRes && bgRes.error) {
+          console.warn(`[ArchiveDownloader] Background service worker reported error:`, bgRes.error);
         }
-      } catch (e) {}
+      } catch (e: any) {
+        console.warn(`[ArchiveDownloader] Background service worker message error:`, e?.message || e);
+      }
     }
 
     if (blob) {
@@ -482,7 +504,9 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
           ctx.drawImage(bitmap, 0, 0, width, height);
           return canvas.toDataURL('image/jpeg', quality);
         }
-      } catch (e) {}
+      } catch (e) {
+        console.warn('[ArchiveDownloader] Bitmap scaling failed, falling back to original blob:', e);
+      }
       return await blobToDataUrl(blob);
     }
 
@@ -641,7 +665,8 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
         // If waiting more than 1000ms without the image appearing, send a nudge flip and direct jump
         if (!nudged && Date.now() - checkStart > 1000) {
           nudged = true;
-          console.log(`[ArchiveDownloader] Image not yet confirmed after 1.0s. Nudging flip/jump to page ${targetPageNum}...`);
+          const currentDomP = provider.getCurrentPage();
+          console.log(`[ArchiveDownloader] Image not yet confirmed after 1.0s (current DOM page: ${currentDomP ?? 'unknown'}). Nudging flip/jump to page ${targetPageNum}...`);
           await provider.triggerPageFlip(targetPageNum);
           if (provider.navigateToPage) {
             await provider.navigateToPage(targetPageNum);
@@ -673,8 +698,10 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
       // If timed out or backed off without page changing:
       retryAttempt++;
       currentRetryCount = retryAttempt;
+      const lastSeenImg = provider.getActivePageImage(200, targetPageNum);
+      const lastSeenSrc = lastSeenImg?.src ? (lastSeenImg.src.length > 70 ? '...' + lastSeenImg.src.slice(-70) : lastSeenImg.src) : 'none';
       console.warn(
-        `[ArchiveDownloader] Page did NOT change after flip attempt ${retryAttempt} for page ${targetPageNum}. Retrying...`
+        `[ArchiveDownloader] Page did NOT change after flip attempt ${retryAttempt} for page ${targetPageNum} (DOM page: ${provider.getCurrentPage() ?? 'unknown'}, lastSeenImg: ${lastSeenSrc}). Retrying...`
       );
 
       broadcastState({

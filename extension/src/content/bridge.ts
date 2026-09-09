@@ -400,8 +400,16 @@ import { BookInfo, BridgeMessage } from '../types';
           try { br.flipSpeed = 0; } catch (e) {}
           if (typeof br.switchMode === 'function') {
             try { br.switchMode(1); } catch (e) {}
+            try { br.switchMode('1up'); } catch (e) {}
+            try { if (br.constMode1up) br.switchMode(br.constMode1up); } catch (e) {}
           } else if (typeof br.switchReadMode === 'function') {
             try { br.switchReadMode(1); } catch (e) {}
+          }
+          const onePageBtn = document.querySelector<HTMLButtonElement>(
+            'button.onepg, .onepg, button[title*="One-page" i], button[aria-label*="One-page" i], button.one-page, .BRpageview1, button[data-mode="1"], [aria-label*="1-page" i], .BRicon_onepage, .view-mode-1up'
+          );
+          if (onePageBtn && !onePageBtn.classList.contains('active')) {
+            try { onePageBtn.click(); } catch (e) {}
           }
           setTimeout(() => {
             const info = extractBookInfo();
@@ -429,14 +437,9 @@ import { BookInfo, BridgeMessage } from '../types';
           console.log(`[ArchiveDownloader] Flipping next page via BookReader (target: ${targetPage ?? 'next'})`);
           let flipped = false;
 
-          // 1. If targetPage is specified, try direct leaf jump first
+          // 1. If targetPage is specified, try direct leaf jump first (leaf numbers: 0, 1, 2...)
           if (typeof targetPage === 'number') {
-            if (typeof br.jumpToIndex === 'function') {
-              try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
-                try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
-              }
-            }
-            if (!flipped && typeof br.jumpToLeaf === 'function') {
+            if (typeof br.jumpToLeaf === 'function') {
               try { br.jumpToLeaf(targetPage); flipped = true; } catch (e) {}
             }
           }
@@ -454,7 +457,14 @@ import { BookInfo, BridgeMessage } from '../types';
             }
           }
 
-          // 3. Legacy versions: br.flipRight() or br.right()
+          // 3. Fallback: br.jumpToIndex if targetPage is specified
+          if (!flipped && typeof targetPage === 'number' && typeof br.jumpToIndex === 'function') {
+            try { br.jumpToIndex(targetPage, { noAnimate: true }); flipped = true; } catch (e) {
+              try { br.jumpToIndex(targetPage); flipped = true; } catch (e2) {}
+            }
+          }
+
+          // 4. Legacy versions: br.flipRight() or br.right()
           if (!flipped) {
             if (typeof br.flipRight === 'function') {
               try { br.flipRight(); flipped = true; } catch (e) {}
@@ -463,7 +473,7 @@ import { BookInfo, BridgeMessage } from '../types';
             }
           }
 
-          // 4. Also trigger DOM Next button click in MAIN world if not already flipped
+          // 5. Trigger DOM Next button click in MAIN world if not already flipped
           if (!flipped) {
             const nextBtn = document.querySelector<HTMLButtonElement>(
               'button[title*="Flip right" i], button[aria-label*="Flip right" i], button.navnext, .book-flip-right, .BRnavnext, [aria-label="Next page" i], [data-action="next-page" i], .BRicon_flip_right'
@@ -485,13 +495,14 @@ import { BookInfo, BridgeMessage } from '../types';
         if (br) {
           console.log(`[ArchiveDownloader] Jumping to leaf ${leafIndex}`);
           let jumped = false;
-          if (typeof br.jumpToIndex === 'function') {
+          // Leaf jumping is leaf-based in BookReader
+          if (typeof br.jumpToLeaf === 'function') {
+            try { br.jumpToLeaf(leafIndex); jumped = true; } catch (e) {}
+          }
+          if (!jumped && typeof br.jumpToIndex === 'function') {
             try { br.jumpToIndex(leafIndex, { noAnimate: true }); jumped = true; } catch (e) {
               try { br.jumpToIndex(leafIndex); jumped = true; } catch (e2) {}
             }
-          }
-          if (!jumped && typeof br.jumpToLeaf === 'function') {
-            try { br.jumpToLeaf(leafIndex); jumped = true; } catch (e) {}
           }
           if (!jumped && typeof br.goToPage === 'function') {
             try { br.goToPage(leafIndex); jumped = true; } catch (e) {}

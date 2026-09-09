@@ -283,6 +283,65 @@ describe('Archive.org Provider & Multi-Version BookReader Integration', () => {
       const found = provider.getActivePageImage(300, 17);
       expect(found).toBeNull();
     });
+
+    it('should ignore older visible container with data-index="1" when targetPageNum=2 is requested', () => {
+      const mockOldImg1: any = {
+        complete: true,
+        naturalWidth: 1560,
+        naturalHeight: 2348,
+        src: 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0001.tif',
+        dataset: { seq: '1' },
+      };
+      const mockOldContainer: any = {
+        tagName: 'DIV',
+        className: 'BRpagecontainer pagediv1 BRpage-visible',
+        getAttribute: (attr: string) => (attr === 'data-index' ? '1' : null),
+        querySelectorAll: () => [mockOldImg1],
+      };
+
+      (globalThis as any).document = {
+        querySelector: (sel: string) => {
+          // Target container for 2 doesn't exist yet
+          return null;
+        },
+        querySelectorAll: (sel: string) => {
+          if (sel.includes('.BRpage-visible')) {
+            return [mockOldContainer];
+          }
+          // Candidate scan has older image
+          return [mockOldImg1];
+        },
+      };
+
+      // Since the only visible container is for page 1 and its file is 0001, requesting page 2 should return null
+      const found = provider.getActivePageImage(300, 2);
+      expect(found).toBeNull();
+    });
+
+    it('should find and accept target container with data-index="2" when targetPageNum=2', () => {
+      const mockImg2: any = {
+        complete: true,
+        naturalWidth: 1560,
+        naturalHeight: 2348,
+        src: 'https://ia800805.us.archive.org/BookReader/BookReaderImages.php?file=principlesteach01nuttgoog_tif/principlesteach01nuttgoog_0002.tif',
+        dataset: {},
+      };
+
+      (globalThis as any).document = {
+        querySelector: (sel: string) => {
+          if (sel.includes('[data-index="2"]') || sel.includes('.pagediv2')) {
+            return mockImg2;
+          }
+          return null;
+        },
+        querySelectorAll: () => [mockImg2],
+      };
+
+      const found = provider.getActivePageImage(300, 2);
+      expect(found).not.toBeNull();
+      expect(found?.dataset.seq).toBe('2');
+      expect(found?.src).toContain('_0002.tif');
+    });
   });
 
   describe('parseArchiveImageUrlPage & parseArchiveDomPage Utility Tests', () => {

@@ -171,11 +171,19 @@ export class ArchiveProvider implements BookProvider {
 
     // Accommodate multiple button selectors across BookReader versions
     const onePageBtn = document.querySelector<HTMLButtonElement>(
-      'button[title*="One-page" i], button[aria-label*="One-page" i], button.one-page, .BRpageview1, button[data-mode="1"], [aria-label*="1-page" i], .BRicon_onepage, .view-mode-1up'
+      'button.onepg, .onepg, button[title*="One-page" i], button[aria-label*="One-page" i], button.one-page, .BRpageview1, button[data-mode="1"], [aria-label*="1-page" i], .BRicon_onepage, .view-mode-1up'
     );
     if (onePageBtn && !onePageBtn.classList.contains('active') && onePageBtn.getAttribute('aria-pressed') !== 'true') {
       try { onePageBtn.click(); } catch (e) {}
     }
+
+    // Keyboard shortcut '1' to switch to 1-page mode in BookReader
+    try {
+      const key1Event = { bubbles: true, cancelable: true, key: '1', code: 'Digit1', keyCode: 49, which: 49 };
+      document.body.dispatchEvent(new KeyboardEvent('keydown', key1Event));
+      window.dispatchEvent(new KeyboardEvent('keydown', key1Event));
+    } catch (e) {}
+
     return true;
   }
 
@@ -199,43 +207,13 @@ export class ArchiveProvider implements BookProvider {
   }
 
   triggerPageFlip(targetPageNum: number): void {
-    // 1. Direct BookReader API call via bridge (most reliable in MAIN world, supports br.jumpToIndex & versions)
+    // Direct BookReader API call via bridge (most reliable in MAIN world, executes jumpToLeaf/next)
+    // Avoid double-clicking DOM buttons simultaneously so the reader doesn't flip twice!
     this.postToBridge('FLIP_NEXT', { targetPage: targetPageNum });
-
-    // 2. DOM button click fallback across multiple BookReader versions (only if needed)
-    const nextBtn = document.querySelector<HTMLButtonElement>(
-      'button[title*="Flip right" i], button[aria-label*="Flip right" i], button.navnext, .book-flip-right, .BRnavnext, [aria-label="Next page" i], [data-action="next-page" i], .BRicon_flip_right, button.page-next'
-    );
-    if (nextBtn) {
-      try { nextBtn.click(); } catch (e) {}
-    }
   }
 
   getActivePageImage(minWidth = 200, targetPageNum?: number): HTMLImageElement | null {
-    // 1. Priority #1: Actively visible page container in the BookReader DOM
-    const visibleContainers = Array.from(document.querySelectorAll<HTMLElement>(
-      '.BRpagecontainer.BRpage-visible, .BRpagecontainer--hasSelection, .BRpage.active, .BRpageview'
-    ));
-    for (const container of visibleContainers) {
-      if (!container || (container as any).tagName === 'IMG' || typeof container.querySelectorAll !== 'function') continue;
-      const imgs = Array.from(container.querySelectorAll<HTMLImageElement>(
-        'img.BRpageimage, img[class*="BRpage"], img[src*="BookReaderImages.php"], img'
-      ));
-      for (const img of imgs) {
-        if (isImageLoaded(img, minWidth)) {
-          if (typeof targetPageNum === 'number') {
-            img.dataset.seq = String(targetPageNum);
-            const fileNum = parseArchiveImageUrlPage(img.src);
-            if (fileNum !== null) {
-              this.detectedOffset = fileNum - targetPageNum;
-            }
-          }
-          return img;
-        }
-      }
-    }
-
-    // 2. Priority #2: Container matching targetPageNum if specified
+    // 1. Priority #1: Target Container explicitly matching targetPageNum if specified
     if (typeof targetPageNum === 'number') {
       const targetSelectors = [
         `.BRpagecontainer[data-index="${targetPageNum}"] img.BRpageimage`,
@@ -252,23 +230,64 @@ export class ArchiveProvider implements BookProvider {
       ];
       for (const sel of targetSelectors) {
         const el = document.querySelector<HTMLImageElement>(sel);
-        if (isImageLoaded(el, minWidth)) {
-          el.dataset.seq = String(targetPageNum);
-          const fileNum = parseArchiveImageUrlPage(el.src);
-          if (fileNum !== null) {
-            this.detectedOffset = fileNum - targetPageNum;
+        if (el) {
+          if (isImageLoaded(el, minWidth)) {
+            el.dataset.seq = String(targetPageNum);
+            const fileNum = parseArchiveImageUrlPage(el.src);
+            if (fileNum !== null) {
+              this.detectedOffset = fileNum - targetPageNum;
+            }
+            return el;
+          } else {
+            // Container for targetPage exists but image is still loading: wait for it!
+            return null;
           }
-          return el;
+        }
+      }
+    }
+
+    // 2. Priority #2: Actively visible page container in the BookReader DOM
+    const visibleContainers = Array.from(document.querySelectorAll<HTMLElement>(
+      '.BRpagecontainer.BRpage-visible, .BRpagecontainer--hasSelection, .BRpage.active, .BRpageview'
+    ));
+    for (const container of visibleContainers) {
+      if (!container || (container as any).tagName === 'IMG' || typeof container.querySelectorAll !== 'function') continue;
+
+      // If targetPageNum is specified, do not accept a visible container that explicitly belongs to an older page!
+      if (typeof targetPageNum === 'number') {
+        const idxAttr = container.getAttribute('data-index') || container.getAttribute('data-page');
+        if (idxAttr) {
+          const cIdx = parseInt(idxAttr, 10);
+          if (!isNaN(cIdx) && cIdx < targetPageNum) {
+            continue; // Stale container from prior page, skip
+          }
+        }
+        const classMatch = container.className.match(/\bpagediv(\d+)\b/);
+        if (classMatch) {
+          const cIdx = parseInt(classMatch[1], 10);
+          if (!isNaN(cIdx) && cIdx < targetPageNum) {
+            continue; // Stale container from prior page, skip
+          }
         }
       }
 
-      // If target container exists in DOM but its image is not yet loaded,
-      // wait for it rather than grabbing an old offscreen image
-      const containerCheck = document.querySelector(
-        `.BRpagecontainer[data-index="${targetPageNum}"], .pagediv${targetPageNum}, [data-index="${targetPageNum}"]`
-      );
-      if (containerCheck) {
-        return null;
+      const imgs = Array.from(container.querySelectorAll<HTMLImageElement>(
+        'img.BRpageimage, img[class*="BRpage"], img[src*="BookReaderImages.php"], img'
+      ));
+      for (const img of imgs) {
+        if (isImageLoaded(img, minWidth)) {
+          if (typeof targetPageNum === 'number') {
+            const fileNum = parseArchiveImageUrlPage(img.src);
+            if (fileNum !== null && fileNum < targetPageNum) {
+              continue; // Older image from prior page, skip
+            }
+            img.dataset.seq = String(targetPageNum);
+            if (fileNum !== null) {
+              this.detectedOffset = fileNum - targetPageNum;
+            }
+          }
+          return img;
+        }
       }
     }
 
