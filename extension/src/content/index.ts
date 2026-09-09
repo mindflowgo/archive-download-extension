@@ -650,39 +650,21 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
 
         await sleep(50);
 
-        const activeImg = provider.getActivePageImage(300, targetPageNum);
-        if (activeImg && activeImg.complete && activeImg.naturalWidth >= 300 && activeImg.src) {
+        const activeImg = provider.getActivePageImage(200, targetPageNum);
+        if (activeImg && activeImg.complete && (activeImg.naturalWidth >= 200 || activeImg.width >= 200) && activeImg.src) {
           // Double check no pending HTTP error before accepting image
           if (lastHttpError && (Date.now() - lastHttpError.timestamp < 3000)) {
             continue; // Do not accept image when error is pending!
           }
 
           const isNewSrc = !lastSrc || activeImg.src !== lastSrc;
-
-          // 1. Container/dataset explicitly matches targetPageNum AND image src has changed
-          const isTargetSeq = activeImg.dataset.seq === String(targetPageNum);
-          if (isNewSrc && isTargetSeq) {
+          if (isNewSrc) {
             currentRetryCount = 0;
             consecutiveErrorCount = 0;
-            console.log(`[ArchiveDownloader] Page ${targetPageNum} visible (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
-            return activeImg;
-          }
-
-          // 2. DOM status indicator (e.g. Page — (57/384)) confirms targetPageNum AND image src changed
-          const domNow = provider.getCurrentPage();
-          if (domNow !== null && domNow >= targetPageNum && isNewSrc) {
-            currentRetryCount = 0;
-            consecutiveErrorCount = 0;
-            console.log(`[ArchiveDownloader] Page ${targetPageNum} visible [DOM status ${domNow}] (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
-            return activeImg;
-          }
-
-          // 3. Image URL contains targetPageNum or standard +1 offset (e.g. _0018.tif for leaf 17)
-          const parsedUrlPage = parseArchiveImageUrlPage(activeImg.src);
-          if (isNewSrc && parsedUrlPage !== null && (parsedUrlPage === targetPageNum || parsedUrlPage === targetPageNum + 1)) {
-            currentRetryCount = 0;
-            consecutiveErrorCount = 0;
-            console.log(`[ArchiveDownloader] Page ${targetPageNum} verified from URL (${activeImg.naturalWidth}x${activeImg.naturalHeight}px, leaf ${parsedUrlPage})!`);
+            activeImg.dataset.seq = String(targetPageNum);
+            const domNow = provider.getCurrentPage();
+            const leafInfo = domNow !== null ? ` [DOM page ${domNow}]` : '';
+            console.log(`[ArchiveDownloader] Page ${targetPageNum} image loaded${leafInfo} (${activeImg.naturalWidth}x${activeImg.naturalHeight}px)!`);
             return activeImg;
           }
         }
@@ -798,9 +780,9 @@ import { getActiveProvider, BookProvider, ArchiveProvider, HathiTrustProvider, p
             await sleep(500);
           }
 
-          currentImg = provider.getActivePageImage(300, pageNum);
+          currentImg = provider.getActivePageImage(200, pageNum);
           if (currentImg) break;
-          await sleep(150);
+          await sleep(100);
         }
       }
 

@@ -30,6 +30,15 @@ export function parseArchiveImageUrlPage(src: string): number | null {
 }
 
 /**
+ * Checks whether an image element is fully loaded, decoded, and represents a real page scan.
+ */
+export function isImageLoaded(img: HTMLImageElement | null | undefined, minWidth = 200): boolean {
+  if (!img) return false;
+  if (!img.src || img.src.startsWith('data:image/gif') || img.src === 'about:blank') return false;
+  return Boolean(img.complete && (img.naturalWidth >= minWidth || img.width >= minWidth));
+}
+
+/**
  * Extracts current and total page from Archive.org DOM indicators.
  * Example: <span class="BRcurrentpage" role="status">Page — (57/384)</span> -> { current: 57, total: 384 }
  */
@@ -202,12 +211,36 @@ export class ArchiveProvider implements BookProvider {
     }
   }
 
-  getActivePageImage(minWidth = 300, targetPageNum?: number): HTMLImageElement | null {
-    // 1. If targetPageNum is specified, find the image verified for this specific page
+  getActivePageImage(minWidth = 200, targetPageNum?: number): HTMLImageElement | null {
+    // 1. Priority #1: Actively visible page container in the BookReader DOM
+    const visibleContainers = Array.from(document.querySelectorAll<HTMLElement>(
+      '.BRpagecontainer.BRpage-visible, .BRpagecontainer--hasSelection, .BRpage.active, .BRpageview'
+    ));
+    for (const container of visibleContainers) {
+      if (!container || (container as any).tagName === 'IMG' || typeof container.querySelectorAll !== 'function') continue;
+      const imgs = Array.from(container.querySelectorAll<HTMLImageElement>(
+        'img.BRpageimage, img[class*="BRpage"], img[src*="BookReaderImages.php"], img'
+      ));
+      for (const img of imgs) {
+        if (isImageLoaded(img, minWidth)) {
+          if (typeof targetPageNum === 'number') {
+            img.dataset.seq = String(targetPageNum);
+            const fileNum = parseArchiveImageUrlPage(img.src);
+            if (fileNum !== null) {
+              this.detectedOffset = fileNum - targetPageNum;
+            }
+          }
+          return img;
+        }
+      }
+    }
+
+    // 2. Priority #2: Container matching targetPageNum if specified
     if (typeof targetPageNum === 'number') {
-      // 1a. Priority #1: Authoritative Container Lookup for targetPageNum
       const targetSelectors = [
+        `.BRpagecontainer[data-index="${targetPageNum}"] img.BRpageimage`,
         `.BRpagecontainer[data-index="${targetPageNum}"] img`,
+        `.pagediv${targetPageNum} img.BRpageimage`,
         `.pagediv${targetPageNum} img`,
         `[data-index="${targetPageNum}"] img.BRpageimage`,
         `[data-index="${targetPageNum}"] img`,
@@ -219,96 +252,58 @@ export class ArchiveProvider implements BookProvider {
       ];
       for (const sel of targetSelectors) {
         const el = document.querySelector<HTMLImageElement>(sel);
-        if (el) {
-          // If image is complete and loaded inside target container, IT IS THE TARGET IMAGE!
-          if (el.complete && el.naturalWidth >= minWidth && el.src) {
-            el.dataset.seq = String(targetPageNum);
-            // Learn filename offset (e.g. leaf 17 having _0018.tif => offset = 18 - 17 = 1)
-            const fileNum = parseArchiveImageUrlPage(el.src);
-            if (fileNum !== null) {
-              this.detectedOffset = fileNum - targetPageNum;
-            }
-            return el;
+        if (isImageLoaded(el, minWidth)) {
+          el.dataset.seq = String(targetPageNum);
+          const fileNum = parseArchiveImageUrlPage(el.src);
+          if (fileNum !== null) {
+            this.detectedOffset = fileNum - targetPageNum;
           }
-          // Container exists but image is still loading: return null so caller waits for it!
-          return null;
+          return el;
         }
       }
 
-      // 1b. Priority #2: If target container not yet rendered in DOM, check visible container if DOM status matches
-      const domPage = this.getCurrentPage();
-      if (domPage !== null && domPage === targetPageNum) {
-        const visibleContainers = Array.from(document.querySelectorAll<HTMLElement>(
-          '.BRpagecontainer.BRpage-visible, .BRpagecontainer--hasSelection, .BRpage.active'
-        ));
-        for (const cont of visibleContainers) {
-          const img = cont.querySelector<HTMLImageElement>('img.BRpageimage, img[class*="BRpage"], img');
-          if (img && img.complete && img.naturalWidth >= minWidth && img.src) {
-            img.dataset.seq = String(targetPageNum);
-            const fileNum = parseArchiveImageUrlPage(img.src);
-            if (fileNum !== null) {
-              this.detectedOffset = fileNum - targetPageNum;
-            }
-            return img;
-          }
-        }
+      // If target container exists in DOM but its image is not yet loaded,
+      // wait for it rather than grabbing an old offscreen image
+      const containerCheck = document.querySelector(
+        `.BRpagecontainer[data-index="${targetPageNum}"], .pagediv${targetPageNum}, [data-index="${targetPageNum}"]`
+      );
+      if (containerCheck) {
+        return null;
       }
-
-      // 1c. Priority #3: URL Filename Matching with calibrated or standard offset
-      const allImages = Array.from(document.querySelectorAll<HTMLImageElement>(
-        'img.BRpageimage, .BRpagecontainer img, .BRpage img, img[src*="BookReaderImages.php"]'
-      )).filter(img => img.complete && img.naturalWidth >= minWidth && img.src);
-
-      for (const img of allImages) {
-        const fileNum = parseArchiveImageUrlPage(img.src);
-        if (fileNum !== null) {
-          const matchesCalibrated = this.detectedOffset !== null && fileNum === targetPageNum + this.detectedOffset;
-          const matchesDefault = this.detectedOffset === null && (fileNum === targetPageNum || fileNum === targetPageNum + 1);
-          if (matchesCalibrated || matchesDefault) {
-            img.dataset.seq = String(targetPageNum);
-            if (this.detectedOffset === null) {
-              this.detectedOffset = fileNum - targetPageNum;
-            }
-            return img;
-          }
-        }
-      }
-
-      // Fallback: If no image specifically has a contradictory URL, check latest DOM image
-      const fallback = allImages[allImages.length - 1];
-      if (fallback) {
-        const fileNum = parseArchiveImageUrlPage(fallback.src);
-        if (fileNum === null || (this.detectedOffset !== null ? fileNum === targetPageNum + this.detectedOffset : (fileNum === targetPageNum || fileNum === targetPageNum + 1))) {
-          fallback.dataset.seq = String(targetPageNum);
-          return fallback;
-        }
-      }
-
-      // Target page image not yet loaded in DOM
-      return null;
     }
 
-    // 2. Fallback when no targetPageNum is specified: Pick the largest visible image in viewport
-    const candidateSelectors = [
-      '.BRpagecontainer img',
-      'img.BRpageimage',
-      '.BRpage img',
-      '.BRpageview img',
-      'img[src*="BookReaderImages.php"]',
-      'img[src*="/BookReader/"]',
-      '.book-page img',
-    ];
-    const images = Array.from(document.querySelectorAll<HTMLImageElement>(candidateSelectors.join(', ')))
-      .filter(img => img.complete && img.naturalWidth >= minWidth && img.src);
+    // 3. Priority #3: Any candidate book scan image across the DOM that is loaded
+    const allImages = Array.from(document.querySelectorAll<HTMLImageElement>(
+      'img.BRpageimage, .BRpagecontainer img, .BRpage img, img[src*="BookReaderImages.php"], img[src*="/BookReader/"], .book-page img'
+    )).filter(img => isImageLoaded(img, minWidth));
 
-    if (images.length === 0) return null;
+    if (allImages.length === 0) return null;
 
+    // If targetPageNum is specified, don't return an image whose URL belongs to an earlier page
+    if (typeof targetPageNum === 'number') {
+      const filtered = allImages.filter(img => {
+        const fileNum = parseArchiveImageUrlPage(img.src);
+        if (fileNum === null) return true;
+        const offset = this.detectedOffset ?? 0;
+        return fileNum >= targetPageNum + offset;
+      });
+      if (filtered.length === 0) return null;
+      const exactMatch = filtered.find(img => {
+        const fn = parseArchiveImageUrlPage(img.src);
+        return fn === targetPageNum || (this.detectedOffset !== null && fn === targetPageNum + this.detectedOffset);
+      });
+      const chosen = exactMatch || filtered[filtered.length - 1];
+      chosen.dataset.seq = String(targetPageNum);
+      return chosen;
+    }
+
+    // Pick the image with the largest visible area in the viewport
     let bestImg: HTMLImageElement | null = null;
     let maxVisibleArea = 0;
     const winW = typeof window !== 'undefined' ? window.innerWidth : 1920;
     const winH = typeof window !== 'undefined' ? window.innerHeight : 1080;
 
-    for (const img of images) {
+    for (const img of allImages) {
       const rect = img.getBoundingClientRect();
       const visibleWidth = Math.max(0, Math.min(rect.right, winW) - Math.max(rect.left, 0));
       const visibleHeight = Math.max(0, Math.min(rect.bottom, winH) - Math.max(rect.top, 0));
@@ -320,7 +315,11 @@ export class ArchiveProvider implements BookProvider {
       }
     }
 
-    return bestImg || images[images.length - 1] || null;
+    const chosen = bestImg || allImages[allImages.length - 1] || null;
+    if (chosen && typeof targetPageNum === 'number') {
+      chosen.dataset.seq = String(targetPageNum);
+    }
+    return chosen;
   }
 
   async extractPageText(pageNum: number, img?: HTMLImageElement | null): Promise<string> {
